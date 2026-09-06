@@ -26,20 +26,45 @@ CREATE TABLE IF NOT EXISTS watched_dirs (
 -- Carpetas destino: a donde pueden ir los archivos. La descripcion en lenguaje
 -- natural es la senal principal mientras la carpeta esta vacia.
 --
+-- parent_id hace la tabla jerarquica: /imagenes/gatos apunta a /imagenes. Se
+-- guarda explicito en vez de deducirlo comparando rutas como texto, que es
+-- fragil con mayusculas, separadores y renombrados. NULL = carpeta raiz.
+--
+--   Regla de precedencia: ante un archivo que encaja en madre e hija, GANA LA
+--   HIJA. Si el usuario creo /imagenes/gatos es porque quiere las fotos de
+--   gatos ahi, no repartidas por la estrategia de /imagenes.
+--
+--   ON DELETE SET NULL, no CASCADE: quitar /imagenes de la configuracion no
+--   significa que /imagenes/gatos deje de ser un destino valido. La hija se
+--   promociona a raiz.
+--
+-- organize_by dice como subdividir en subcarpetas lo que caiga aqui y no
+-- encaje en ninguna hija. Aplica a CUALQUIER carpeta, no solo a la papelera:
+-- /imagenes puede querer agrupar por mes igual que /Unsorted.
+--
+-- is_trash marca las carpetas que aceptan lo que nadie mas quiso. Puede haber
+-- varias: si ninguna carpeta normal supera el umbral, se puntua SOLO entre las
+-- papeleras y gana la mejor SIN umbral -- alguien tiene que quedarse el
+-- archivo. Su description sirve para repartir entre ellas.
+--
 -- auto_move + auto_move_since implementan la confianza graduada: el modo
 -- automatico se activa por carpeta, cuando se ha ganado con aciertos.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS folders (
     id               INTEGER PRIMARY KEY,
+    parent_id        INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     path             TEXT    NOT NULL UNIQUE,
     description      TEXT    NOT NULL DEFAULT '',
+    organize_by      TEXT    NOT NULL DEFAULT 'none',  -- none|month|type|content
     enabled          INTEGER NOT NULL DEFAULT 1,
     auto_move        INTEGER NOT NULL DEFAULT 0,
     auto_move_since  TEXT,
-    is_trash         INTEGER NOT NULL DEFAULT 0,  -- la carpeta "basura" / Unsorted
+    is_trash         INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 
 -- ---------------------------------------------------------------------------
 -- Archivos conocidos. 'path' es la ruta ACTUAL; el historico esta en journal.

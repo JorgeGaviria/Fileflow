@@ -18,10 +18,12 @@ erDiagram
 
     folders {
         int id PK
+        int parent_id FK "jerarquia, NULL si es raiz"
         text path UK
         text description "senal en lenguaje natural"
+        text organize_by "none, month, type o content"
+        bool is_trash "acepta lo que nadie quiso"
         bool auto_move "confianza graduada"
-        bool is_trash "carpeta de descarte"
         bool enabled
     }
 
@@ -98,6 +100,7 @@ erDiagram
         text value
     }
 
+    folders ||--o{ folders : "contiene"
     folders ||--o{ files : "alberga"
     folders ||--o{ folder_vectors : "se representa con"
     folders ||--o{ exemplars : "aprende de"
