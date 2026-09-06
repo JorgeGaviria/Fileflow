@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# --- Fileflow: todo esto es LOCAL de cada maquina ---
+# El indice y los embeddings dependen del perfil de hardware y del modelo
+# usado, no son portables entre las dos maquinas de desarrollo.
+.fileflow/
+*.db
+*.db-wal
+*.db-shm
+models/
+data/
+
+# La configuracion local (directorios vigilados, perfil elegido) es de cada PC.
+config.local.json
+
+# --- Editor / SO ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

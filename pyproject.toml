@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fileflow"
+version = "0.1.0"
+description = "Organizador de archivos local que entiende el contenido, no solo la extension"
+requires-python = ">=3.12"
+dependencies = [
+    "watchdog>=4.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Extraccion de contenido (hito 4)
+extract = [
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "Pillow>=10.0",
+]
+# Inferencia en produccion (hito 5)
+onnx = [
+    "onnxruntime>=1.17",
+]
+# Experimentacion con modelos: solo en desarrollo, arrastra PyTorch (~2-3 GB).
+# Ver docs/modelos-y-perfiles.md
+research = [
+    "sentence-transformers>=3.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+fileflow = "fileflow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fileflow*"]
+
+[tool.setuptools.package-data]
+fileflow = ["db/*.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

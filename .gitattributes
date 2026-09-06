@@ -1,0 +1,14 @@
+# Normaliza finales de linea: el repo guarda LF, el disco usa lo nativo.
+# Evita diffs falsos al trabajar en dos maquinas.
+* text=auto
+
+*.py   text eol=lf
+*.sql  text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+
+# Binarios de las fixtures
+*.pdf  binary
+*.jpg  binary
+*.png  binary
+*.zip  binary
