@@ -100,7 +100,7 @@ mientras tanto.
 
 Esto importa especialmente en este proyecto porque se desarrolla en dos máquinas con
 perfiles distintos: cada una tendrá su propio índice, y por eso la base de datos **no se
-versiona ni se sincroniza**. Ver [entorno de desarrollo](entorno-de-desarrollo.md).
+versiona ni se sincroniza**. Ver [entorno de desarrollo](../proyecto/entorno-de-desarrollo.md).
 
 ## Sobre el LLM
 

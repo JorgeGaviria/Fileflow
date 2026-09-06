@@ -24,7 +24,7 @@ Sin LLM, sin GPU, sin dependencias pesadas.
 
 - **Movimiento automático.** Todo pasa por confirmación. Sin datos de precisión, activar el
   automático es apostar con los archivos del usuario.
-- **LLM.** Ver [modelos y perfiles](modelos-y-perfiles.md).
+- **LLM.** Ver [modelos y perfiles](../diseno/modelos-y-perfiles.md).
 - **Explorador de archivos.** Ver más abajo.
 - **OCR**, audio y vídeo.
 

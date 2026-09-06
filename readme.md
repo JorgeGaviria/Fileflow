@@ -82,15 +82,27 @@ automático **solo para esa carpeta**. La confianza se gana con evidencia, no se
 
 ## Documentación
 
-| Documento | Contenido |
+Índice completo en [docs/](docs/README.md).
+
+**Diseño** — el porqué de cada decisión
+| | |
 |---|---|
-| [Arquitectura](docs/arquitectura.md) | Pipeline en cascada, capas y flujo de un archivo |
-| [Motor de decisión](docs/motor-de-decision.md) | Scoring, arranque en frío, aprendizaje por corrección |
-| [Modelos y perfiles](docs/modelos-y-perfiles.md) | Por qué ONNX, qué modelos y perfiles de hardware |
-| [Esquema de datos](docs/esquema-de-datos.md) | Tablas de SQLite y decisiones de diseño |
-| [Watcher y seguridad](docs/watcher-y-seguridad.md) | Detección de archivos, journal, undo y casos límite |
-| [Roadmap](docs/roadmap.md) | Alcance de v1 y qué viene después |
-| [Entorno de desarrollo](docs/entorno-de-desarrollo.md) | Puesta en marcha y trabajo en dos máquinas |
+| [Arquitectura](docs/diseno/arquitectura.md) | Pipeline en cascada, capas y flujo de un archivo |
+| [Motor de decisión](docs/diseno/motor-de-decision.md) | Scoring, arranque en frío, aprendizaje por corrección |
+| [Modelos y perfiles](docs/diseno/modelos-y-perfiles.md) | Por qué ONNX, qué modelos y perfiles de hardware |
+
+**Referencia** — cómo está construido
+| | |
+|---|---|
+| [Esquema de datos](docs/referencia/esquema-de-datos.md) | Tablas de SQLite y decisiones de diseño |
+| [Watcher y seguridad](docs/referencia/watcher-y-seguridad.md) | Detección de archivos, journal, undo y casos límite |
+| [Diagrama relacional](docs/diagramas/esquema-relacional.md) | Diagrama entidad-relación del índice |
+
+**Proyecto** — cómo se trabaja
+| | |
+|---|---|
+| [Roadmap](docs/proyecto/roadmap.md) | Alcance de v1 y qué viene después |
+| [Entorno de desarrollo](docs/proyecto/entorno-de-desarrollo.md) | Puesta en marcha y trabajo en dos máquinas |
 
 ## Requisitos
 
@@ -109,4 +121,4 @@ python -m fileflow init                  # crea el indice
 python -m fileflow watch ~/Downloads     # empieza a vigilar
 ```
 
-Ver [entorno de desarrollo](docs/entorno-de-desarrollo.md) para el detalle.
+Ver [entorno de desarrollo](docs/proyecto/entorno-de-desarrollo.md) para el detalle.

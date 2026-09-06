@@ -69,7 +69,7 @@ Los tres motivos por los que el índice **no** puede compartirse entre las dos m
 3. **Contenido personal** del usuario, que no debe entrar en un commit jamás.
 
 Cada máquina construye su propio índice, y por eso cada vector guarda su `model_id`
-(ver [esquema de datos](esquema-de-datos.md)).
+(ver [esquema de datos](../referencia/esquema-de-datos.md)).
 
 ## El corpus de pruebas (`fixtures/`)
 
@@ -135,4 +135,4 @@ romperse al empaquetar.
 | `sentence-transformers` | Experimentación (solo dev) | dev |
 
 `sqlite3` viene en la biblioteca estándar. No hace falta base vectorial
-(ver [esquema de datos](esquema-de-datos.md)).
+(ver [esquema de datos](../referencia/esquema-de-datos.md)).
