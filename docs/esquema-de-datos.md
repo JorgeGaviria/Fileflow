@@ -79,6 +79,124 @@ escalar, sin divisiones — es la operación más repetida de todo el sistema.
 Si algún día hiciera falta, `sqlite-vec` se puede añadir sin cambiar el esquema: es una
 extensión sobre el mismo motor, no otra base de datos.
 
+## Diagrama relacional
+
+```mermaid
+erDiagram
+    watched_dirs {
+        int id PK
+        text path UK "de donde salen los archivos"
+        bool recursive
+        bool enabled
+    }
+
+    folders {
+        int id PK
+        text path UK
+        text description "senal en lenguaje natural"
+        bool auto_move "confianza graduada"
+        text auto_move_since
+        bool is_trash "carpeta de descarte"
+        bool enabled
+    }
+
+    files {
+        int id PK
+        text path UK "ruta ACTUAL"
+        text name
+        text ext
+        int size
+        real mtime
+        text content_hash "blake2b parcial"
+        text status "maquina de estados"
+        int folder_id FK
+    }
+
+    embeddings {
+        int file_id PK_FK
+        text kind PK "text | image"
+        text model_id PK "nunca se mezclan"
+        int dim
+        blob vector "float32 norma 1"
+    }
+
+    folder_vectors {
+        int folder_id PK_FK
+        text source PK "description | centroid"
+        text kind PK
+        text model_id PK
+        int dim
+        blob vector
+        int n_samples "alimenta beta"
+    }
+
+    exemplars {
+        int id PK
+        int folder_id FK
+        text kind
+        text model_id
+        blob vector
+        text source_file
+    }
+
+    rules {
+        int id PK
+        text kind "ext | glob | regex"
+        text pattern
+        int folder_id FK
+        int priority
+        bool enabled
+    }
+
+    decisions {
+        int id PK
+        int file_id FK
+        text candidates "JSON top-5 con scores"
+        int proposed_folder_id FK
+        real confidence
+        real margin "score1 - score2"
+        text stage
+        text model_id
+        text verdict
+        int final_folder_id FK
+    }
+
+    journal {
+        int id PK
+        text op "move | rename | mkdir | trash"
+        text src
+        text dst
+        int file_id FK
+        int decision_id FK
+        text state "planned | done | failed | undone"
+    }
+
+    meta {
+        text key PK
+        text value
+    }
+
+    folders     ||--o{ files          : "alberga"
+    folders     ||--o{ folder_vectors : "se representa con"
+    folders     ||--o{ exemplars      : "aprende de"
+    folders     ||--o{ rules          : "es destino de"
+    folders     ||--o{ decisions      : "es propuesta en"
+
+    files       ||--o{ embeddings     : "se vectoriza en"
+    files       ||--o{ decisions      : "genera"
+    files       ||--o{ journal        : "se mueve en"
+
+    decisions   ||--o{ journal        : "ejecuta"
+```
+
+Dos observaciones que el diagrama hace evidentes:
+
+- **`watched_dirs` y `meta` son islas**: no tienen ninguna relación. Es correcto —
+  `watched_dirs` dice *de dónde* vienen los archivos y `folders` *a dónde* van; son
+  conceptos distintos aunque ambos sean rutas.
+- **`folders` y `files` son los dos centros de gravedad.** Todo lo demás cuelga de uno de
+  los dos, salvo `journal`, que cuelga de ambos porque registra el acto de unirlos.
+
 ## Las tablas
 
 ### `files` — qué existe y en qué estado está
