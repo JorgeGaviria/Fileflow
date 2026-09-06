@@ -13,11 +13,23 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- ---------------------------------------------------------------------------
 -- Directorios vigilados: de donde salen los archivos nuevos.
+--
+-- subdirs sustituye a un booleano 'recursive', que se quedaba corto. Que hacer
+-- con las carpetas que aparecen dentro:
+--
+--   unit     cada subcarpeta es UNA cosa, se clasifica y se mueve entera
+--            (por defecto: extraer un zip no debe desperdigar su contenido)
+--   ignore   no se mira dentro en absoluto
+--   descend  cada archivo de dentro se clasifica por separado
+--
+-- El defecto es 'unit' porque 'descend' es destructivo con carpetas que el
+-- usuario mantiene juntas a proposito.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS watched_dirs (
     id         INTEGER PRIMARY KEY,
     path       TEXT    NOT NULL UNIQUE,
-    recursive  INTEGER NOT NULL DEFAULT 1,
+    subdirs    TEXT    NOT NULL DEFAULT 'unit'
+               CHECK (subdirs IN ('unit', 'ignore', 'descend')),
     enabled    INTEGER NOT NULL DEFAULT 1,
     added_at   TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -69,34 +81,72 @@ CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 -- ---------------------------------------------------------------------------
 -- Archivos conocidos. 'path' es la ruta ACTUAL; el historico esta en journal.
 --
--- status:
---   pending    detectado, aun no analizado
---   unstable   sigue creciendo (descarga en curso), no tocar
---   analyzed   ya tiene embedding
+-- status: seis estados. Un estado existe solo si es PERSISTENTE y le importa
+-- al usuario; lo transitorio y lo deducible no son estados.
+--
+--   pending    detectado, sin resolver
 --   proposed   hay una decision esperando confirmacion
 --   moved      colocado en su carpeta destino
 --   ignored    excluido por el usuario o por regla
 --   missing    ya no esta en disco (borrado o movido por fuera)
---   error      fallo al procesar, ver last_error
+--   error      fallo al procesar, ver last_error. Sin este estado se
+--              reintentaria en bucle un archivo que siempre falla.
+--
+-- Se descartaron dos:
+--   'unstable' era transitorio -- vive en el watcher mientras el archivo se
+--   escribe y nunca llega a la base.
+--   'analyzed' era deducible -- o tiene fila en embeddings o no la tiene.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS files (
     id            INTEGER PRIMARY KEY,
+
+    -- kind: una carpeta tratada como unidad es, para Fileflow, la misma clase
+    -- de cosa que un archivo -- tiene ruta, tamano, fecha, vector, destino y
+    -- se mueve igual. Por eso comparte tabla en vez de tener un pipeline
+    -- paralelo. (La tabla deberia llamarse 'items'; renombrado pendiente.)
+    kind          TEXT    NOT NULL DEFAULT 'file'
+                  CHECK (kind IN ('file', 'dir')),
+    n_children    INTEGER,                 -- solo dir: cuantos archivos contiene
+
     path          TEXT    NOT NULL UNIQUE,
     name          TEXT    NOT NULL,
     ext           TEXT    NOT NULL DEFAULT '',
     size          INTEGER NOT NULL DEFAULT 0,
-    mtime         REAL    NOT NULL DEFAULT 0,
-    content_hash  TEXT,                    -- blake2b parcial, para detectar duplicados
-    status        TEXT    NOT NULL DEFAULT 'pending',
+
+    -- Fechas DEL ARCHIVO, las que dice el sistema de archivos.
+    -- Se guardan las dos porque significan cosas distintas y organize_by
+    -- necesita elegir: una foto de 2019 descargada hoy tiene btime de hoy y
+    -- mtime de 2019 (si se preservo). Para fotos, la fecha real esta en los
+    -- metadatos EXIF; eso es v2.
+    btime         REAL,                    -- creacion
+    mtime         REAL    NOT NULL DEFAULT 0,  -- ultima modificacion
+
+    -- Para 'file': blake2b parcial (cabecera + cola + tamano).
+    -- Para 'dir' : hash del listado recursivo. Hace falta porque la fecha de
+    -- una carpeta no cambia si se modifica un archivo dos niveles mas abajo.
+    content_hash  TEXT,
+
+    status        TEXT    NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','proposed','moved',
+                                    'ignored','missing','error')),
     folder_id     INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+
+    -- Fechas DE FILEFLOW, lo que hicimos nosotros.
     first_seen    TEXT    NOT NULL DEFAULT (datetime('now')),
     last_seen     TEXT    NOT NULL DEFAULT (datetime('now')),
+    -- filed_at duplica informacion que ya esta en journal. Se acepta la copia
+    -- porque deducirla exigiria buscar la entrada mas reciente del journal por
+    -- cada fila de un listado de miles de archivos. REGLA: journal es la
+    -- verdad; filed_at es una copia por comodidad. Si discrepan, manda journal.
+    filed_at      TEXT,
+
     last_error    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id);
 CREATE INDEX IF NOT EXISTS idx_files_hash   ON files(content_hash);
+CREATE INDEX IF NOT EXISTS idx_files_kind   ON files(kind);
 
 -- ---------------------------------------------------------------------------
 -- Embeddings. model_id y dim van SIEMPRE con el vector: vectores de modelos

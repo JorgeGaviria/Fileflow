@@ -12,7 +12,7 @@ erDiagram
     watched_dirs {
         int id PK
         text path UK "de donde salen los archivos"
-        bool recursive
+        text subdirs "unit, ignore o descend"
         bool enabled
     }
 
@@ -29,14 +29,19 @@ erDiagram
 
     files {
         int id PK
+        text kind "file o dir"
+        int n_children "solo dir"
         text path UK "ruta ACTUAL"
         text name
         text ext
         int size
-        real mtime
-        text content_hash "blake2b parcial"
-        text status "maquina de estados"
-        int folder_id FK
+        real btime "creacion"
+        real mtime "modificacion"
+        text content_hash "archivo o listado"
+        text status "6 estados"
+        int folder_id FK "destino, NULL si sin clasificar"
+        text first_seen "Fileflow lo vio"
+        text filed_at "Fileflow lo movio"
     }
 
     embeddings {

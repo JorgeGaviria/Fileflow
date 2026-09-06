@@ -169,12 +169,13 @@ class Index:
 
     # -- directorios vigilados ----------------------------------------------
 
-    def add_watched_dir(self, path: str | Path, recursive: bool = True) -> int:
+    def add_watched_dir(self, path: str | Path, subdirs: str = "unit") -> int:
+        """subdirs: 'unit' (cada subcarpeta es una cosa), 'ignore' o 'descend'."""
         p = str(Path(path).resolve())
         cur = self.conn.execute(
-            "INSERT INTO watched_dirs (path, recursive) VALUES (?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET enabled = 1, recursive = excluded.recursive",
-            (p, int(recursive)),
+            "INSERT INTO watched_dirs (path, subdirs) VALUES (?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET enabled = 1, subdirs = excluded.subdirs",
+            (p, subdirs),
         )
         self.conn.commit()
         if cur.lastrowid:

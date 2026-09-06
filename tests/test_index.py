@@ -6,6 +6,8 @@ comparaciones, no en el CRUD trivial.
 
 from __future__ import annotations
 
+import sqlite3
+
 import numpy as np
 import pytest
 
@@ -62,7 +64,7 @@ def test_upsert_es_idempotente(index, sample_file):
 def test_archivo_modificado_vuelve_a_pending(index, sample_file):
     """Si el contenido cambia, el analisis previo ya no vale."""
     file_id = index.upsert_file(sample_file)
-    index.set_status(file_id, "analyzed")
+    index.set_status(file_id, "proposed")
     index.put_embedding(file_id, "text", "e5-small", np.ones(384, dtype=np.float32))
 
     sample_file.write_bytes(b"contenido distinto y mas largo que antes")
@@ -202,3 +204,30 @@ def test_operacion_fallida_no_es_deshacible(index):
     journal_id = index.plan_operation("move", src="/a/x", dst="/b/x")
     index.complete_operation(journal_id, error="archivo bloqueado")
     assert index.undoable_operations() == []
+
+
+def test_estados_invalidos_se_rechazan(index, sample_file):
+    """Los seis estados son un contrato cerrado. Un typo debe fallar en el
+    momento, no escribir basura que rompa mucho despues y lejos."""
+    file_id = index.upsert_file(sample_file)
+    for valido in ("pending", "proposed", "moved", "ignored", "missing", "error"):
+        index.set_status(file_id, valido)
+
+    for invalido in ("analyzed", "unstable", "Pending", ""):
+        with pytest.raises(sqlite3.IntegrityError):
+            index.set_status(file_id, invalido)
+
+
+def test_politica_de_subcarpetas(index, tmp_path):
+    """subdirs sustituye al booleano 'recursive'. El defecto es 'unit' porque
+    'descend' desperdiga carpetas que el usuario mantiene juntas."""
+    d = tmp_path / "descargas"
+    d.mkdir()
+    index.add_watched_dir(d)
+    assert index.list_watched_dirs()[0]["subdirs"] == "unit"
+
+    index.add_watched_dir(d, subdirs="descend")
+    assert index.list_watched_dirs()[0]["subdirs"] == "descend"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        index.add_watched_dir(tmp_path / "otra", subdirs="recursivo")
