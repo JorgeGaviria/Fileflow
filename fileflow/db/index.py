@@ -22,7 +22,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 
-SCHEMA_VERSION = 2  # renombrado a items, jerarquia de carpetas, nombres explicitos
+SCHEMA_VERSION = 3  # status unificado, sin DELETE de entidades propias
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -97,9 +97,11 @@ class FolderRecord:
     id: int
     path: str
     description: str
-    enabled: bool
+    status: str
     auto_move: bool
     is_trash: bool
+    parent_id: int | None = None
+    organize_by: str = "none"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> FolderRecord:
@@ -107,9 +109,11 @@ class FolderRecord:
             id=row["id"],
             path=row["path"],
             description=row["description"],
-            enabled=bool(row["enabled"]),
+            status=row["status"],
             auto_move=bool(row["auto_move"]),
             is_trash=bool(row["is_trash"]),
+            parent_id=row["parent_id"],
+            organize_by=row["organize_by"],
         )
 
 
@@ -199,7 +203,8 @@ class Index:
         p = str(Path(path).resolve())
         cur = self.conn.execute(
             "INSERT INTO watched_dirs (path, subdir_policy) VALUES (?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET enabled = 1, subdir_policy = excluded.subdir_policy",
+            "ON CONFLICT(path) DO UPDATE SET "
+            "  status = 'active', subdir_policy = excluded.subdir_policy",
             (p, subdir_policy),
         )
         self.conn.commit()
@@ -208,11 +213,9 @@ class Index:
         row = self.conn.execute("SELECT id FROM watched_dirs WHERE path = ?", (p,)).fetchone()
         return row["id"]
 
-    def list_watched_dirs(self, enabled_only: bool = True) -> list[sqlite3.Row]:
-        sql = "SELECT * FROM watched_dirs"
-        if enabled_only:
-            sql += " WHERE enabled = 1"
-        return list(self.conn.execute(sql + " ORDER BY path"))
+    def list_watched_dirs(self, active_only: bool = True) -> list[sqlite3.Row]:
+        table = "active_watched_dirs" if active_only else "watched_dirs"
+        return list(self.conn.execute(f"SELECT * FROM {table} ORDER BY path"))
 
     # -- carpetas destino ----------------------------------------------------
 
@@ -228,6 +231,7 @@ class Index:
             "ON CONFLICT(path) DO UPDATE SET "
             "  description = excluded.description, "
             "  is_trash = excluded.is_trash, "
+            "  status = 'active', "
             "  updated_at = datetime('now')",
             (p, description, int(is_trash)),
         )
@@ -237,15 +241,41 @@ class Index:
         row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (p,)).fetchone()
         return row["id"]
 
-    def list_folders(self, enabled_only: bool = True) -> list[FolderRecord]:
-        sql = "SELECT * FROM folders"
-        if enabled_only:
-            sql += " WHERE enabled = 1"
-        return [FolderRecord.from_row(r) for r in self.conn.execute(sql + " ORDER BY path")]
+    def list_folders(self, active_only: bool = True) -> list[FolderRecord]:
+        table = "active_folders" if active_only else "folders"
+        return [
+            FolderRecord.from_row(r)
+            for r in self.conn.execute(f"SELECT * FROM {table} ORDER BY path")
+        ]
 
-    def get_trash_folder(self) -> FolderRecord | None:
-        row = self.conn.execute("SELECT * FROM folders WHERE is_trash = 1 LIMIT 1").fetchone()
-        return FolderRecord.from_row(row) if row else None
+    def list_trash_folders(self) -> list[FolderRecord]:
+        """Puede haber varias. Si ninguna carpeta normal supera el umbral se
+        puntua solo entre estas, sin umbral: alguien tiene que quedarse el
+        archivo."""
+        return [
+            FolderRecord.from_row(r)
+            for r in self.conn.execute("SELECT * FROM active_folders WHERE is_trash = 1")
+        ]
+
+    def remove_folder(self, folder_id: int) -> None:
+        """Baja logica: nunca DELETE.
+
+        Conserva centroide, ejemplares e historial de decisiones, de modo que
+        volver a anadir la carpeta recupera todo lo aprendido. Las hijas se
+        promocionan a raiz: quitar /imagenes de la configuracion no invalida
+        /imagenes/gatos como destino. Esa promocion se hace aqui a mano porque,
+        al no haber DELETE, el ON DELETE SET NULL no llega a dispararse.
+        """
+        self.conn.execute(
+            "UPDATE folders SET parent_id = NULL, updated_at = datetime('now') "
+            "WHERE parent_id = ?",
+            (folder_id,),
+        )
+        self.conn.execute(
+            "UPDATE folders SET status = 'deleted', updated_at = datetime('now') WHERE id = ?",
+            (folder_id,),
+        )
+        self.conn.commit()
 
     # -- archivos ------------------------------------------------------------
 
@@ -595,8 +625,8 @@ class Index:
         return {
             "items": scalar("SELECT COUNT(*) FROM items"),
             "by_status": by_status,
-            "folders": scalar("SELECT COUNT(*) FROM folders"),
-            "watched_dirs": scalar("SELECT COUNT(*) FROM watched_dirs WHERE enabled = 1"),
+            "folders": scalar("SELECT COUNT(*) FROM active_folders"),
+            "watched_dirs": scalar("SELECT COUNT(*) FROM active_watched_dirs"),
             "embeddings": scalar("SELECT COUNT(*) FROM embeddings"),
             "exemplars": scalar("SELECT COUNT(*) FROM exemplars"),
             "pending_decisions": scalar("SELECT COUNT(*) FROM decisions WHERE verdict = 'pending'"),

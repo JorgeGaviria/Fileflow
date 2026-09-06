@@ -248,3 +248,49 @@ def test_indice_de_otra_version_falla_con_mensaje_claro(tmp_path):
 
     with pytest.raises(RuntimeError, match="version 1 del esquema"):
         Index(db)
+
+
+# -- borrado logico ----------------------------------------------------------
+
+
+def test_quitar_carpeta_conserva_lo_aprendido(index, tmp_path):
+    """El aprendizaje es la parte cara: quitar una carpeta y volver a anadirla
+    debe recuperar centroide, ejemplares e historial intactos."""
+    folder_id = index.add_folder(tmp_path / "documentos", "facturas y contratos")
+    index.update_centroid(folder_id, "text", "e5-small", np.array([1.0, 0.0], dtype=np.float32))
+    index.add_exemplar(folder_id, "text", "e5-small", np.array([0.0, 1.0], dtype=np.float32))
+
+    index.remove_folder(folder_id)
+    assert index.list_folders() == []                      # ya no compite
+    assert len(index.list_folders(active_only=False)) == 1  # pero sigue ahi
+
+    # Volver a anadirla reactiva la MISMA fila.
+    otra_vez = index.add_folder(tmp_path / "documentos", "facturas y contratos")
+    assert otra_vez == folder_id
+
+    _, n = index.get_folder_vector(folder_id, "centroid", "text", "e5-small")
+    assert n == 1
+    assert index.get_exemplars(folder_id, "text", "e5-small").shape[0] == 1
+
+
+def test_quitar_la_madre_promociona_a_las_hijas(index, tmp_path):
+    """Quitar /imagenes de la configuracion no invalida /imagenes/gatos."""
+    madre = index.add_folder(tmp_path / "imagenes", "todas las imagenes")
+    hija = index.add_folder(tmp_path / "imagenes" / "gatos", "fotos de mis gatos")
+    index.conn.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (madre, hija))
+    index.conn.commit()
+
+    index.remove_folder(madre)
+
+    activas = index.list_folders()
+    assert [f.id for f in activas] == [hija]
+    assert activas[0].parent_id is None  # promocionada a raiz
+
+
+def test_los_ids_no_se_reutilizan(index, tmp_path):
+    """Con borrado duro, SQLite reasigna el id y la carpeta nueva heredaria
+    los vectores de la vieja en silencio."""
+    primera = index.add_folder(tmp_path / "documentos", "documentos")
+    index.remove_folder(primera)
+    segunda = index.add_folder(tmp_path / "musica", "musica")
+    assert segunda != primera

@@ -4,6 +4,26 @@
 -- Criterio de nombres: se evitan abreviaturas y jerga. Toda fecha termina en
 -- _at. Las fechas que vienen del sistema de archivos llevan prefijo fs_ para
 -- distinguirlas de las que genera Fileflow.
+--
+-- REGLA DEL SISTEMA: Fileflow no hace DELETE de sus propias entidades. Los
+-- items, las carpetas y los directorios vigilados se marcan con status, nunca
+-- se borran. Tres motivos:
+--
+--   1. El aprendizaje es la parte cara. Quitar /documentos una semana no debe
+--      costar su centroide, sus ejemplares y su historial de decisiones:
+--      volver a anadirla los recupera intactos (ON CONFLICT ... SET status).
+--   2. SQLite reutiliza los ids de las filas borradas. Con borrado duro, la
+--      siguiente carpeta creada puede heredar los vectores de una anterior
+--      sin que nada falle -- clasificaria con el perfil equivocado en
+--      silencio.
+--   3. Coherencia: si Fileflow no borra archivos del usuario, tampoco deberia
+--      borrar lo que aprendio de ellos.
+--
+-- Las clausulas ON DELETE se conservan como red de seguridad, aunque no
+-- deberian dispararse nunca.
+--
+-- Consulta siempre las vistas active_* en vez de las tablas, salvo que
+-- quieras el historico a proposito.
 
 PRAGMA foreign_keys = ON;
 
@@ -39,9 +59,13 @@ CREATE TABLE IF NOT EXISTS watched_dirs (
     path          TEXT    NOT NULL UNIQUE,
     subdir_policy TEXT    NOT NULL DEFAULT 'unit'
                   CHECK (subdir_policy IN ('unit', 'ignore', 'descend')),
-    enabled       INTEGER NOT NULL DEFAULT 1,
+    status        TEXT    NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'disabled', 'deleted')),
     added_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE VIEW IF NOT EXISTS active_watched_dirs AS
+    SELECT * FROM watched_dirs WHERE status = 'active';
 
 -- ---------------------------------------------------------------------------
 -- Carpetas destino: a donde pueden ir los archivos. La descripcion en lenguaje
@@ -55,9 +79,10 @@ CREATE TABLE IF NOT EXISTS watched_dirs (
 --   HIJA. Si el usuario creo /imagenes/gatos es porque quiere las fotos de
 --   gatos ahi, no repartidas por la estrategia de /imagenes.
 --
---   ON DELETE SET NULL, no CASCADE: quitar /imagenes de la configuracion no
---   significa que /imagenes/gatos deje de ser un destino valido. La hija se
---   promociona a raiz.
+--   Al marcar una madre como 'deleted', sus hijas se promocionan a raiz
+--   (parent_id = NULL): quitar /imagenes de la configuracion no invalida
+--   /imagenes/gatos como destino. OJO: como no hay DELETE, el ON DELETE SET
+--   NULL no se dispara -- esa promocion la hace el codigo explicitamente.
 --
 -- organize_by dice como subdividir en subcarpetas lo que caiga aqui y no
 -- encaje en ninguna hija. Aplica a CUALQUIER carpeta, no solo a la papelera:
@@ -81,10 +106,14 @@ CREATE TABLE IF NOT EXISTS folders (
     is_trash         INTEGER NOT NULL DEFAULT 0,
     auto_move        INTEGER NOT NULL DEFAULT 0,
     auto_move_since  TEXT,
-    enabled          INTEGER NOT NULL DEFAULT 1,
+    status           TEXT    NOT NULL DEFAULT 'active'
+                     CHECK (status IN ('active', 'disabled', 'deleted')),
     created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE VIEW IF NOT EXISTS active_folders AS
+    SELECT * FROM folders WHERE status = 'active';
 
 CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 

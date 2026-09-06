@@ -13,7 +13,7 @@ erDiagram
         int id PK
         text path UK "de donde salen los archivos"
         text subdir_policy "unit, ignore o descend"
-        bool enabled
+        text status "active, disabled o deleted"
     }
 
     folders {
@@ -24,7 +24,7 @@ erDiagram
         text organize_by "none, month, type o content"
         bool is_trash "acepta lo que nadie quiso"
         bool auto_move "confianza graduada"
-        bool enabled
+        text status "active, disabled o deleted"
     }
 
     items {
@@ -118,6 +118,11 @@ erDiagram
     decisions ||--o{ journal : "ejecuta"
 ```
 
+> **Fileflow no hace `DELETE` de sus propias entidades.** `items`, `folders` y
+> `watched_dirs` se dan de baja con `status`, nunca se borran. Por eso el diagrama no
+> tiene relaciones de borrado en cascada como camino normal: las cláusulas `ON DELETE`
+> están como red de seguridad, no como mecanismo previsto.
+
 ## Cómo leerlo
 
 **`folders` e `items` son los dos centros de gravedad.** Todo lo demás cuelga de uno de los
@@ -127,6 +132,12 @@ mover un archivo a una carpeta.
 **`watched_dirs` y `meta` son islas**, sin ninguna relación. Es correcto y deliberado:
 `watched_dirs` dice *de dónde* vienen los archivos y `folders` *a dónde* van. Son conceptos
 distintos aunque ambos guarden rutas.
+
+**El `status` sustituye al borrado.** Quitar una carpeta no destruye lo que Fileflow
+aprendió de ella: al volver a añadirla se reactiva la misma fila y recupera su centroide,
+sus ejemplares y su historial de decisiones. Hay además un motivo técnico — SQLite
+reutiliza los identificadores de las filas borradas, así que con borrado duro una carpeta
+nueva podría heredar los vectores de una anterior sin que nada fallara.
 
 **Las claves primarias compuestas cuentan la historia importante.** En `embeddings` la clave
 es `(item_id, vector_space, model_id)`, no solo `item_id`. Eso permite que un mismo archivo tenga a
