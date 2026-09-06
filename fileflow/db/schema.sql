@@ -1,10 +1,19 @@
 -- Fileflow - esquema del indice
--- Ver docs/esquema-de-datos.md para el razonamiento detras de cada tabla.
+-- Ver docs/referencia/esquema-de-datos.md para el razonamiento de cada tabla.
+--
+-- Criterio de nombres: se evitan abreviaturas y jerga. Toda fecha termina en
+-- _at. Las fechas que vienen del sistema de archivos llevan prefijo fs_ para
+-- distinguirlas de las que genera Fileflow.
 
 PRAGMA foreign_keys = ON;
 
 -- ---------------------------------------------------------------------------
--- Metadatos del propio indice (version de esquema, perfil activo, etc.)
+-- Metadatos del propio indice.
+--
+-- Guarda datos sobre la BASE, no sobre los archivos: con que version de
+-- esquema y con que modelo se construyo. Va en una tabla y no en un fichero de
+-- configuracion para que el indice sea autodescriptivo: abrirlo debe bastar
+-- para saber que es.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -14,8 +23,8 @@ CREATE TABLE IF NOT EXISTS meta (
 -- ---------------------------------------------------------------------------
 -- Directorios vigilados: de donde salen los archivos nuevos.
 --
--- subdirs sustituye a un booleano 'recursive', que se quedaba corto. Que hacer
--- con las carpetas que aparecen dentro:
+-- subdir_policy sustituye a un booleano 'recursive', que se quedaba corto.
+-- Que hacer con las carpetas que aparecen dentro:
 --
 --   unit     cada subcarpeta es UNA cosa, se clasifica y se mueve entera
 --            (por defecto: extraer un zip no debe desperdigar su contenido)
@@ -26,12 +35,12 @@ CREATE TABLE IF NOT EXISTS meta (
 -- usuario mantiene juntas a proposito.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS watched_dirs (
-    id         INTEGER PRIMARY KEY,
-    path       TEXT    NOT NULL UNIQUE,
-    subdirs    TEXT    NOT NULL DEFAULT 'unit'
-               CHECK (subdirs IN ('unit', 'ignore', 'descend')),
-    enabled    INTEGER NOT NULL DEFAULT 1,
-    added_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    id            INTEGER PRIMARY KEY,
+    path          TEXT    NOT NULL UNIQUE,
+    subdir_policy TEXT    NOT NULL DEFAULT 'unit'
+                  CHECK (subdir_policy IN ('unit', 'ignore', 'descend')),
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    added_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ---------------------------------------------------------------------------
@@ -67,11 +76,12 @@ CREATE TABLE IF NOT EXISTS folders (
     parent_id        INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     path             TEXT    NOT NULL UNIQUE,
     description      TEXT    NOT NULL DEFAULT '',
-    organize_by      TEXT    NOT NULL DEFAULT 'none',  -- none|month|type|content
-    enabled          INTEGER NOT NULL DEFAULT 1,
+    organize_by      TEXT    NOT NULL DEFAULT 'none'
+                     CHECK (organize_by IN ('none', 'month', 'type', 'content')),
+    is_trash         INTEGER NOT NULL DEFAULT 0,
     auto_move        INTEGER NOT NULL DEFAULT 0,
     auto_move_since  TEXT,
-    is_trash         INTEGER NOT NULL DEFAULT 0,
+    enabled          INTEGER NOT NULL DEFAULT 1,
     created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -79,7 +89,12 @@ CREATE TABLE IF NOT EXISTS folders (
 CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 
 -- ---------------------------------------------------------------------------
--- Archivos conocidos. 'path' es la ruta ACTUAL; el historico esta en journal.
+-- Cosas clasificables. Se llama 'items' y no 'files' porque una carpeta
+-- tratada como unidad es, para Fileflow, la misma clase de cosa que un
+-- archivo: tiene ruta, tamano, fecha, vector y destino, y se mueve y se
+-- deshace igual. Por eso comparten tabla en vez de tener pipelines paralelos.
+--
+-- 'path' es la ruta ACTUAL; el historico de donde estuvo esta en journal.
 --
 -- status: seis estados. Un estado existe solo si es PERSISTENTE y le importa
 -- al usuario; lo transitorio y lo deducible no son estados.
@@ -92,170 +107,192 @@ CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 --   error      fallo al procesar, ver last_error. Sin este estado se
 --              reintentaria en bucle un archivo que siempre falla.
 --
--- Se descartaron dos:
---   'unstable' era transitorio -- vive en el watcher mientras el archivo se
---   escribe y nunca llega a la base.
---   'analyzed' era deducible -- o tiene fila en embeddings o no la tiene.
+-- Se descartaron dos: 'unstable' era transitorio (vive en el watcher mientras
+-- el archivo se escribe, nunca llega a la base) y 'analyzed' era deducible
+-- (o tiene fila en embeddings o no la tiene).
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS files (
-    id            INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS items (
+    id              INTEGER PRIMARY KEY,
 
-    -- kind: una carpeta tratada como unidad es, para Fileflow, la misma clase
-    -- de cosa que un archivo -- tiene ruta, tamano, fecha, vector, destino y
-    -- se mueve igual. Por eso comparte tabla en vez de tener un pipeline
-    -- paralelo. (La tabla deberia llamarse 'items'; renombrado pendiente.)
-    kind          TEXT    NOT NULL DEFAULT 'file'
-                  CHECK (kind IN ('file', 'dir')),
-    n_children    INTEGER,                 -- solo dir: cuantos archivos contiene
+    item_type       TEXT    NOT NULL DEFAULT 'file'
+                    CHECK (item_type IN ('file', 'dir')),
+    child_count     INTEGER,                -- solo 'dir': cuantos archivos contiene
 
-    path          TEXT    NOT NULL UNIQUE,
-    name          TEXT    NOT NULL,
-    ext           TEXT    NOT NULL DEFAULT '',
-    size          INTEGER NOT NULL DEFAULT 0,
+    path            TEXT    NOT NULL UNIQUE,
+    name            TEXT    NOT NULL,
+    extension       TEXT    NOT NULL DEFAULT '',
+    size_bytes      INTEGER NOT NULL DEFAULT 0,
 
-    -- Fechas DEL ARCHIVO, las que dice el sistema de archivos.
-    -- Se guardan las dos porque significan cosas distintas y organize_by
-    -- necesita elegir: una foto de 2019 descargada hoy tiene btime de hoy y
-    -- mtime de 2019 (si se preservo). Para fotos, la fecha real esta en los
-    -- metadatos EXIF; eso es v2.
-    btime         REAL,                    -- creacion
-    mtime         REAL    NOT NULL DEFAULT 0,  -- ultima modificacion
+    -- Fechas del SISTEMA DE ARCHIVOS. Se guardan las dos porque significan
+    -- cosas distintas y organize_by='month' tiene que elegir: una foto de 2019
+    -- descargada hoy tiene fs_created_at de hoy y fs_modified_at de 2019 (si
+    -- se preservo). Para fotos la fecha real esta en los metadatos EXIF; v2.
+    fs_created_at   REAL,
+    fs_modified_at  REAL    NOT NULL DEFAULT 0,
 
     -- Para 'file': blake2b parcial (cabecera + cola + tamano).
     -- Para 'dir' : hash del listado recursivo. Hace falta porque la fecha de
     -- una carpeta no cambia si se modifica un archivo dos niveles mas abajo.
-    content_hash  TEXT,
+    content_hash    TEXT,
 
-    status        TEXT    NOT NULL DEFAULT 'pending'
-                  CHECK (status IN ('pending','proposed','moved',
-                                    'ignored','missing','error')),
-    folder_id     INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'proposed', 'moved',
+                                      'ignored', 'missing', 'error')),
+    folder_id       INTEGER REFERENCES folders(id) ON DELETE SET NULL,
 
-    -- Fechas DE FILEFLOW, lo que hicimos nosotros.
-    first_seen    TEXT    NOT NULL DEFAULT (datetime('now')),
-    last_seen     TEXT    NOT NULL DEFAULT (datetime('now')),
-    -- filed_at duplica informacion que ya esta en journal. Se acepta la copia
-    -- porque deducirla exigiria buscar la entrada mas reciente del journal por
-    -- cada fila de un listado de miles de archivos. REGLA: journal es la
-    -- verdad; filed_at es una copia por comodidad. Si discrepan, manda journal.
-    filed_at      TEXT,
+    -- Fechas de FILEFLOW: lo que hicimos nosotros.
+    first_seen_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    last_seen_at    TEXT    NOT NULL DEFAULT (datetime('now')),
 
-    last_error    TEXT
+    -- organized_at duplica informacion que ya esta en journal. Se acepta la
+    -- copia porque deducirla exigiria buscar la entrada mas reciente del
+    -- journal por cada fila de un listado de miles. REGLA: journal es la
+    -- verdad; organized_at es una copia por comodidad. Si discrepan, manda
+    -- journal.
+    organized_at    TEXT,
+
+    last_error      TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
-CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id);
-CREATE INDEX IF NOT EXISTS idx_files_hash   ON files(content_hash);
-CREATE INDEX IF NOT EXISTS idx_files_kind   ON files(kind);
+CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
+CREATE INDEX IF NOT EXISTS idx_items_folder ON items(folder_id);
+CREATE INDEX IF NOT EXISTS idx_items_hash   ON items(content_hash);
+CREATE INDEX IF NOT EXISTS idx_items_type   ON items(item_type);
 
 -- ---------------------------------------------------------------------------
--- Embeddings. model_id y dim van SIEMPRE con el vector: vectores de modelos
+-- Embeddings de los items.
+--
+-- model_id y dimensions van SIEMPRE con el vector: vectores de modelos
 -- distintos no son comparables, y toda consulta filtra por model_id.
--- kind distingue el espacio vectorial (texto vs imagen), que tampoco se mezclan.
+--
+-- vector_space separa el espacio de texto del de imagen. Se llamaba 'kind',
+-- pero ese nombre significaba tres cosas distintas en tres tablas.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS embeddings (
-    file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    kind       TEXT    NOT NULL,           -- 'text' | 'image'
-    model_id   TEXT    NOT NULL,
-    dim        INTEGER NOT NULL,
-    vector     BLOB    NOT NULL,           -- float32 little-endian, norma 1
-    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (file_id, kind, model_id)
+    item_id      INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    vector_space TEXT    NOT NULL,          -- 'text' | 'image'
+    model_id     TEXT    NOT NULL,
+    dimensions   INTEGER NOT NULL,
+    vector       BLOB    NOT NULL,          -- float32 little-endian, norma 1
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (item_id, vector_space, model_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_emb_model ON embeddings(model_id, kind);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_id, vector_space);
 
 -- ---------------------------------------------------------------------------
--- Vectores de carpeta: descripcion y centroide, las dos senales del scoring.
--- source: 'description' | 'centroid'
--- n_samples solo aplica al centroide y alimenta el peso adaptativo beta.
+-- Vectores de carpeta: las dos senales del scoring.
+--
+--   signal='description'  el embedding de lo que escribio el usuario
+--   signal='centroid'     la media de lo que la carpeta ya contiene
+--
+-- sample_count solo aplica al centroide y alimenta el peso adaptativo
+-- beta = n / (n + k) de la formula de scoring.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS folder_vectors (
-    folder_id   INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-    source      TEXT    NOT NULL,
-    kind        TEXT    NOT NULL,
-    model_id    TEXT    NOT NULL,
-    dim         INTEGER NOT NULL,
-    vector      BLOB    NOT NULL,
-    n_samples   INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (folder_id, source, kind, model_id)
+    folder_id    INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    signal       TEXT    NOT NULL CHECK (signal IN ('description', 'centroid')),
+    vector_space TEXT    NOT NULL,
+    model_id     TEXT    NOT NULL,
+    dimensions   INTEGER NOT NULL,
+    vector       BLOB    NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (folder_id, signal, vector_space, model_id)
 );
 
 -- ---------------------------------------------------------------------------
 -- Ejemplares: correcciones explicitas del usuario. La senal mas valiosa,
 -- porque es supervision humana directa.
+--
+-- Van aparte y no diluidos en el centroide a proposito: el centroide es una
+-- media (una correccion se pierde entre cientos de archivos), mientras que los
+-- ejemplares se puntuan por MAXIMA similitud. Una correccion tiene que poder
+-- cambiar el resultado ella sola.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS exemplars (
+    id           INTEGER PRIMARY KEY,
+    folder_id    INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    vector_space TEXT    NOT NULL,
+    model_id     TEXT    NOT NULL,
+    dimensions   INTEGER NOT NULL,
+    vector       BLOB    NOT NULL,
+    source_path  TEXT,                      -- de que item salio, para trazabilidad
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exemplars_folder
+    ON exemplars(folder_id, model_id, vector_space);
+
+-- ---------------------------------------------------------------------------
+-- Reglas rapidas (etapa 1 del pipeline). priority mayor gana; las que crea el
+-- usuario desde la bandeja entran con prioridad alta.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rules (
     id          INTEGER PRIMARY KEY,
+    match_type  TEXT    NOT NULL CHECK (match_type IN ('extension', 'glob', 'regex')),
+    pattern     TEXT    NOT NULL,
     folder_id   INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-    kind        TEXT    NOT NULL,
-    model_id    TEXT    NOT NULL,
-    dim         INTEGER NOT NULL,
-    vector      BLOB    NOT NULL,
-    source_file TEXT,                      -- de que archivo salio, para trazabilidad
+    priority    INTEGER NOT NULL DEFAULT 0,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT    NOT NULL DEFAULT 'user' CHECK (created_by IN ('user', 'builtin')),
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_exemplars_folder ON exemplars(folder_id, model_id, kind);
-
 -- ---------------------------------------------------------------------------
--- Reglas rapidas (etapa 1). priority mayor gana; las creadas por el usuario
--- desde la bandeja entran con prioridad alta.
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS rules (
-    id         INTEGER PRIMARY KEY,
-    kind       TEXT    NOT NULL,           -- 'ext' | 'glob' | 'regex'
-    pattern    TEXT    NOT NULL,
-    folder_id  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-    priority   INTEGER NOT NULL DEFAULT 0,
-    enabled    INTEGER NOT NULL DEFAULT 1,
-    created_by TEXT    NOT NULL DEFAULT 'user',  -- 'user' | 'builtin'
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-);
-
--- ---------------------------------------------------------------------------
--- Decisiones. Se guarda el TOP-5 COMPLETO en 'candidates' (JSON), no solo la
--- elegida: es lo que permite distinguir un fallo de calibracion (la correcta
--- era la #2) de uno de representacion (no estaba en la lista).
+-- Decisiones: que se propuso y que paso.
 --
--- verdict: pending | accepted | corrected | rejected
+-- candidates_json guarda el TOP-5 COMPLETO con sus scores, no solo la carpeta
+-- elegida. Es lo que permite distinguir despues un fallo de calibracion (la
+-- correcta estaba en el puesto 2) de uno de representacion (no estaba en la
+-- lista). Sin eso solo sabes que fallaste, no por que.
+--
+-- decided_by dice que etapa del pipeline resolvio: regla rapida, similitud
+-- semantica, LLM o descarte por defecto.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS decisions (
     id                 INTEGER PRIMARY KEY,
-    file_id            INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    candidates         TEXT    NOT NULL,   -- JSON: [{folder_id, score, alpha, beta}]
+    item_id            INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    candidates_json    TEXT    NOT NULL,    -- [{folder_id, score, alpha, beta}]
     proposed_folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     confidence         REAL    NOT NULL DEFAULT 0,
     margin             REAL    NOT NULL DEFAULT 0,  -- score#1 - score#2
-    stage              TEXT    NOT NULL,   -- 'rule' | 'semantic' | 'llm' | 'fallback'
+    decided_by         TEXT    NOT NULL
+                       CHECK (decided_by IN ('rule', 'semantic', 'llm', 'fallback')),
     model_id           TEXT,
     profile            TEXT,
-    verdict            TEXT    NOT NULL DEFAULT 'pending',
+    verdict            TEXT    NOT NULL DEFAULT 'pending'
+                       CHECK (verdict IN ('pending', 'accepted', 'corrected', 'rejected')),
     final_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
     decided_at         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_verdict ON decisions(verdict);
-CREATE INDEX IF NOT EXISTS idx_decisions_file    ON decisions(file_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_item    ON decisions(item_id);
 
 -- ---------------------------------------------------------------------------
 -- Journal: toda operacion sobre el sistema de archivos pasa por aqui, ANTES
 -- de ejecutarse. Es lo que hace que cualquier movimiento sea reversible.
+--
+-- Escribir la intencion antes y no despues es lo que lo hace util: si el
+-- proceso muere a mitad, quedan entradas en 'planned' y se sabe exactamente
+-- que quedo a medias y donde mirar.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS journal (
-    id          INTEGER PRIMARY KEY,
-    op          TEXT    NOT NULL,          -- 'move' | 'rename' | 'mkdir' | 'trash'
-    src         TEXT,
-    dst         TEXT,
-    file_id     INTEGER REFERENCES files(id) ON DELETE SET NULL,
-    decision_id INTEGER REFERENCES decisions(id) ON DELETE SET NULL,
-    state       TEXT    NOT NULL DEFAULT 'planned',  -- planned|done|failed|undone
-    error       TEXT,
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-    done_at     TEXT,
-    undone_at   TEXT
+    id           INTEGER PRIMARY KEY,
+    operation    TEXT    NOT NULL
+                 CHECK (operation IN ('move', 'rename', 'mkdir', 'trash')),
+    source_path  TEXT,
+    dest_path    TEXT,
+    item_id      INTEGER REFERENCES items(id) ON DELETE SET NULL,
+    decision_id  INTEGER REFERENCES decisions(id) ON DELETE SET NULL,
+    state        TEXT    NOT NULL DEFAULT 'planned'
+                 CHECK (state IN ('planned', 'done', 'failed', 'undone')),
+    error        TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    done_at      TEXT,
+    undone_at    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_journal_state ON journal(state);

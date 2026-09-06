@@ -122,7 +122,7 @@ def test_reconcile_detecta_archivos_nuevos(tmp_path, index):
     report = reconcile(index, [watched])
 
     assert len(report.new) == 2
-    assert index.stats()["files"] == 2
+    assert index.stats()["items"] == 2
 
 
 def test_reconcile_detecta_modificados_y_desaparecidos(tmp_path, index):
@@ -144,7 +144,7 @@ def test_reconcile_detecta_modificados_y_desaparecidos(tmp_path, index):
     assert [p.name for p in report.modified] == ["cambia.txt"]
     assert [Path(p).name for p in report.missing] == ["se_borra.tmp.pdf"]
     assert report.unchanged == 1
-    assert index.get_file_by_path(stable).status == "pending"
+    assert index.get_item_by_path(stable).status == "pending"
 
 
 def test_reconcile_es_idempotente(tmp_path, index):
@@ -157,4 +157,4 @@ def test_reconcile_es_idempotente(tmp_path, index):
 
     assert second.new == []
     assert second.unchanged == 1
-    assert index.stats()["files"] == 1
+    assert index.stats()["items"] == 1

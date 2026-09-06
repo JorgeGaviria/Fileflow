@@ -1,13 +1,13 @@
 """Mide si SQLite + NumPy bastan, o si hace falta una base vectorial.
 
-Respalda con numeros la decision documentada en docs/esquema-de-datos.md. No es
+Respalda con numeros la decision documentada en docs/referencia/esquema-de-datos.md. No es
 un test (pytest no lo recoge: no empieza por test_), es una medicion que se
 ejecuta a mano:
 
     python tests/bench_vectors.py
 
 Conviene reejecutarlo en las dos maquinas de desarrollo: la comparacion entre
-ambas es parte del metodo de trabajo (ver docs/entorno-de-desarrollo.md).
+ambas es parte del metodo de trabajo (ver docs/proyecto/entorno-de-desarrollo.md).
 
 Mide los dos casos que ocurren de verdad:
   [A] clasificar un archivo  -> comparar contra las CARPETAS (decenas)
@@ -56,7 +56,8 @@ def main() -> None:
     # Insercion directa: aqui se mide el almacenamiento, no la API del indice.
     index.conn.execute("PRAGMA foreign_keys = OFF")
     index.conn.executemany(
-        "INSERT INTO embeddings (file_id, kind, model_id, dim, vector) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO embeddings (item_id, vector_space, model_id, dimensions, vector) "
+        "VALUES (?, ?, ?, ?, ?)",
         rows,
     )
     index.conn.commit()

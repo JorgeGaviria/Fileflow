@@ -3,13 +3,13 @@
 Ninguna otra parte del codigo escribe SQL. Eso mantiene en un solo sitio las dos
 invariantes que importan:
 
-  1. Un vector NUNCA se lee ni se compara sin filtrar por (model_id, kind).
+  1. Un vector NUNCA se lee ni se compara sin filtrar por (model_id, vector_space).
      Vectores de modelos distintos no dan un resultado malo, dan un resultado
      sin sentido.
   2. Toda operacion sobre el sistema de archivos queda registrada en el journal
      ANTES de ejecutarse.
 
-Ver docs/esquema-de-datos.md
+Ver docs/referencia/esquema-de-datos.md
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # renombrado a items, jerarquia de carpetas, nombres explicitos
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -45,10 +45,12 @@ def pack_vector(vec: np.ndarray) -> bytes:
     return v.astype("<f4").tobytes()
 
 
-def unpack_vector(blob: bytes, dim: int) -> np.ndarray:
+def unpack_vector(blob: bytes, dimensions: int) -> np.ndarray:
     vec = np.frombuffer(blob, dtype="<f4")
-    if vec.size != dim:
-        raise ValueError(f"vector corrupto: se esperaban {dim} dimensiones, hay {vec.size}")
+    if vec.size != dimensions:
+        raise ValueError(
+            f"vector corrupto: se esperaban {dimensions} dimensiones, hay {vec.size}"
+        )
     return vec
 
 
@@ -58,29 +60,35 @@ def unpack_vector(blob: bytes, dim: int) -> np.ndarray:
 
 
 @dataclass
-class FileRecord:
+class ItemRecord:
+    """Un archivo o una carpeta tratada como unidad."""
+
     id: int
+    item_type: str
     path: str
     name: str
-    ext: str
-    size: int
-    mtime: float
+    extension: str
+    size_bytes: int
+    fs_modified_at: float
     status: str
     content_hash: str | None = None
     folder_id: int | None = None
+    child_count: int | None = None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> FileRecord:
+    def from_row(cls, row: sqlite3.Row) -> ItemRecord:
         return cls(
             id=row["id"],
+            item_type=row["item_type"],
             path=row["path"],
             name=row["name"],
-            ext=row["ext"],
-            size=row["size"],
-            mtime=row["mtime"],
+            extension=row["extension"],
+            size_bytes=row["size_bytes"],
+            fs_modified_at=row["fs_modified_at"],
             status=row["status"],
             content_hash=row["content_hash"],
             folder_id=row["folder_id"],
+            child_count=row["child_count"],
         )
 
 
@@ -115,7 +123,7 @@ class Index:
 
     Uso:
         with Index(path) as idx:
-            idx.upsert_file(...)
+            idx.upsert_item(...)
     """
 
     def __init__(self, db_path: str | Path):
@@ -140,19 +148,35 @@ class Index:
 
     # -- esquema -------------------------------------------------------------
 
+    def _table_exists(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        return row is not None
+
     def _migrate(self) -> None:
+        """Aplica el esquema, comprobando la version ANTES de tocar nada.
+
+        El orden importa. Con CREATE TABLE IF NOT EXISTS, una base creada por
+        una version anterior conserva sus tablas viejas: el script no las
+        recrea y el fallo aparece mucho despues, como un criptico
+        'no such column'. Comprobando primero, el mensaje dice que pasa.
+
+        Mientras el proyecto este en desarrollo temprano la via soportada es
+        borrar el indice y reindexar: es una cache reconstruible, la
+        informacion que importa esta en los archivos del usuario.
+        """
+        if self._table_exists("meta"):
+            current = self.get_meta("schema_version")
+            if current is not None and int(current) != SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"El indice de {self.db_path} es de la version {current} del esquema "
+                    f"y este codigo espera la {SCHEMA_VERSION}.\n"
+                    f"Borra {self.db_path.parent} y vuelve a indexar."
+                )
+
         self.conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-        current = self.get_meta("schema_version")
-        if current is None:
-            self.set_meta("schema_version", str(SCHEMA_VERSION))
-        elif int(current) != SCHEMA_VERSION:
-            # Mientras el proyecto este en desarrollo temprano la via soportada
-            # es borrar .fileflow/ y reindexar: el indice es una cache
-            # reconstruible. Ver docs/esquema-de-datos.md
-            raise RuntimeError(
-                f"El indice es version {current} y el codigo espera {SCHEMA_VERSION}. "
-                f"Borra {self.db_path.parent} y vuelve a indexar."
-            )
+        self.set_meta("schema_version", str(SCHEMA_VERSION))
         self.conn.commit()
 
     def get_meta(self, key: str) -> str | None:
@@ -169,13 +193,14 @@ class Index:
 
     # -- directorios vigilados ----------------------------------------------
 
-    def add_watched_dir(self, path: str | Path, subdirs: str = "unit") -> int:
-        """subdirs: 'unit' (cada subcarpeta es una cosa), 'ignore' o 'descend'."""
+    def add_watched_dir(self, path: str | Path, subdir_policy: str = "unit") -> int:
+        """subdir_policy: 'unit' (cada subcarpeta es una cosa), 'ignore' o
+        'descend' (cada archivo de dentro por separado)."""
         p = str(Path(path).resolve())
         cur = self.conn.execute(
-            "INSERT INTO watched_dirs (path, subdirs) VALUES (?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET enabled = 1, subdirs = excluded.subdirs",
-            (p, subdirs),
+            "INSERT INTO watched_dirs (path, subdir_policy) VALUES (?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET enabled = 1, subdir_policy = excluded.subdir_policy",
+            (p, subdir_policy),
         )
         self.conn.commit()
         if cur.lastrowid:
@@ -224,7 +249,7 @@ class Index:
 
     # -- archivos ------------------------------------------------------------
 
-    def upsert_file(self, path: str | Path, status: str = "pending") -> int:
+    def upsert_item(self, path: str | Path, status: str = "pending") -> int:
         """Da de alta o actualiza un archivo a partir de su estado en disco.
 
         Si el archivo ya existia y cambio de tamano o mtime, vuelve a 'pending'
@@ -234,52 +259,52 @@ class Index:
         stat = p.stat()
         resolved = str(p.resolve())
 
-        existing = self.get_file_by_path(resolved)
+        existing = self.get_item_by_path(resolved)
         if existing:
-            changed = existing.size != stat.st_size or abs(existing.mtime - stat.st_mtime) > 1e-6
+            changed = existing.size_bytes != stat.st_size or abs(existing.fs_modified_at - stat.st_mtime) > 1e-6
             new_status = "pending" if changed else existing.status
             self.conn.execute(
-                "UPDATE files SET size = ?, mtime = ?, status = ?, last_seen = datetime('now') "
+                "UPDATE items SET size_bytes = ?, fs_modified_at = ?, status = ?, last_seen_at = datetime('now') "
                 "WHERE id = ?",
                 (stat.st_size, stat.st_mtime, new_status, existing.id),
             )
             if changed:
                 # El contenido cambio: los embeddings viejos ya no describen
                 # este archivo.
-                self.conn.execute("DELETE FROM embeddings WHERE file_id = ?", (existing.id,))
+                self.conn.execute("DELETE FROM embeddings WHERE item_id = ?", (existing.id,))
             self.conn.commit()
             return existing.id
 
         cur = self.conn.execute(
-            "INSERT INTO files (path, name, ext, size, mtime, status) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO items (path, name, extension, size_bytes, fs_modified_at, status) VALUES (?, ?, ?, ?, ?, ?)",
             (resolved, p.name, p.suffix.lower(), stat.st_size, stat.st_mtime, status),
         )
         self.conn.commit()
         return cur.lastrowid
 
-    def get_file_by_path(self, path: str | Path) -> FileRecord | None:
+    def get_item_by_path(self, path: str | Path) -> ItemRecord | None:
         row = self.conn.execute(
-            "SELECT * FROM files WHERE path = ?", (str(Path(path).resolve()),)
+            "SELECT * FROM items WHERE path = ?", (str(Path(path).resolve()),)
         ).fetchone()
-        return FileRecord.from_row(row) if row else None
+        return ItemRecord.from_row(row) if row else None
 
-    def get_file(self, file_id: int) -> FileRecord | None:
-        row = self.conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
-        return FileRecord.from_row(row) if row else None
+    def get_item(self, item_id: int) -> ItemRecord | None:
+        row = self.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        return ItemRecord.from_row(row) if row else None
 
-    def iter_files(self, status: str | None = None) -> Iterator[FileRecord]:
-        sql = "SELECT * FROM files"
+    def iter_items(self, status: str | None = None) -> Iterator[ItemRecord]:
+        sql = "SELECT * FROM items"
         params: tuple[Any, ...] = ()
         if status:
             sql += " WHERE status = ?"
             params = (status,)
         for row in self.conn.execute(sql + " ORDER BY id"):
-            yield FileRecord.from_row(row)
+            yield ItemRecord.from_row(row)
 
-    def set_status(self, file_id: int, status: str, error: str | None = None) -> None:
+    def set_status(self, item_id: int, status: str, error: str | None = None) -> None:
         self.conn.execute(
-            "UPDATE files SET status = ?, last_error = ?, last_seen = datetime('now') WHERE id = ?",
-            (status, error, file_id),
+            "UPDATE items SET status = ?, last_error = ?, last_seen_at = datetime('now') WHERE id = ?",
+            (status, error, item_id),
         )
         self.conn.commit()
 
@@ -290,53 +315,60 @@ class Index:
             return 0
         placeholders = ",".join("?" * len(paths))
         cur = self.conn.execute(
-            f"UPDATE files SET status = 'missing' WHERE path IN ({placeholders})",
+            f"UPDATE items SET status = 'missing' WHERE path IN ({placeholders})",
             paths,
         )
         self.conn.commit()
         return cur.rowcount
 
     def all_indexed_paths(self) -> set[str]:
-        return {r["path"] for r in self.conn.execute("SELECT path FROM files")}
+        return {r["path"] for r in self.conn.execute("SELECT path FROM items")}
 
     # -- embeddings ----------------------------------------------------------
 
-    def put_embedding(self, file_id: int, kind: str, model_id: str, vec: np.ndarray) -> None:
+    def put_embedding(
+        self, item_id: int, vector_space: str, model_id: str, vec: np.ndarray
+    ) -> None:
         self.conn.execute(
-            "INSERT INTO embeddings (file_id, kind, model_id, dim, vector) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(file_id, kind, model_id) DO UPDATE SET "
-            "  vector = excluded.vector, dim = excluded.dim, created_at = datetime('now')",
-            (file_id, kind, model_id, int(np.size(vec)), pack_vector(vec)),
+            "INSERT INTO embeddings (item_id, vector_space, model_id, dimensions, vector) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(item_id, vector_space, model_id) DO UPDATE SET "
+            "  vector = excluded.vector, dimensions = excluded.dimensions, "
+            "  created_at = datetime('now')",
+            (item_id, vector_space, model_id, int(np.size(vec)), pack_vector(vec)),
         )
         self.conn.commit()
 
-    def get_embedding(self, file_id: int, kind: str, model_id: str) -> np.ndarray | None:
+    def get_embedding(
+        self, item_id: int, vector_space: str, model_id: str
+    ) -> np.ndarray | None:
         row = self.conn.execute(
-            "SELECT vector, dim FROM embeddings WHERE file_id = ? AND kind = ? AND model_id = ?",
-            (file_id, kind, model_id),
+            "SELECT vector, dimensions FROM embeddings "
+            "WHERE item_id = ? AND vector_space = ? AND model_id = ?",
+            (item_id, vector_space, model_id),
         ).fetchone()
-        return unpack_vector(row["vector"], row["dim"]) if row else None
+        return unpack_vector(row["vector"], row["dimensions"]) if row else None
 
-    def load_matrix(self, kind: str, model_id: str) -> tuple[list[int], np.ndarray]:
-        """Todos los embeddings de un (kind, model_id) como matriz (n, dim).
+    def load_matrix(self, vector_space: str, model_id: str) -> tuple[list[int], np.ndarray]:
+        """Todos los embeddings de un (vector_space, model_id) como matriz.
 
         Con vectores normalizados, `matriz @ consulta` da todas las similitudes
         coseno de golpe. A la escala de una coleccion personal (10^4-10^5) la
         fuerza bruta con NumPy tarda milisegundos y evita una dependencia de
-        base vectorial. Ver docs/esquema-de-datos.md
+        base vectorial. Ver docs/referencia/esquema-de-datos.md
         """
         rows = list(
             self.conn.execute(
-                "SELECT file_id, vector, dim FROM embeddings WHERE kind = ? AND model_id = ? "
-                "ORDER BY file_id",
-                (kind, model_id),
+                "SELECT item_id, vector, dimensions FROM embeddings "
+                "WHERE vector_space = ? AND model_id = ? ORDER BY item_id",
+                (vector_space, model_id),
             )
         )
         if not rows:
             return [], np.empty((0, 0), dtype=np.float32)
-        dim = rows[0]["dim"]
-        ids = [r["file_id"] for r in rows]
-        matrix = np.vstack([unpack_vector(r["vector"], dim) for r in rows])
+        dimensions = rows[0]["dimensions"]
+        ids = [r["item_id"] for r in rows]
+        matrix = np.vstack([unpack_vector(r["vector"], dimensions) for r in rows])
         return ids, matrix
 
     # -- vectores de carpeta -------------------------------------------------
@@ -344,36 +376,47 @@ class Index:
     def put_folder_vector(
         self,
         folder_id: int,
-        source: str,
-        kind: str,
+        signal: str,
+        vector_space: str,
         model_id: str,
         vec: np.ndarray,
-        n_samples: int = 0,
+        sample_count: int = 0,
     ) -> None:
-        """source: 'description' | 'centroid'"""
+        """signal: 'description' | 'centroid' -- las dos senales del scoring."""
         self.conn.execute(
-            "INSERT INTO folder_vectors (folder_id, source, kind, model_id, dim, vector, n_samples)"
+            "INSERT INTO folder_vectors "
+            "(folder_id, signal, vector_space, model_id, dimensions, vector, sample_count)"
             " VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(folder_id, source, kind, model_id) DO UPDATE SET "
-            "  vector = excluded.vector, dim = excluded.dim, "
-            "  n_samples = excluded.n_samples, updated_at = datetime('now')",
-            (folder_id, source, kind, model_id, int(np.size(vec)), pack_vector(vec), n_samples),
+            "ON CONFLICT(folder_id, signal, vector_space, model_id) DO UPDATE SET "
+            "  vector = excluded.vector, dimensions = excluded.dimensions, "
+            "  sample_count = excluded.sample_count, updated_at = datetime('now')",
+            (
+                folder_id,
+                signal,
+                vector_space,
+                model_id,
+                int(np.size(vec)),
+                pack_vector(vec),
+                sample_count,
+            ),
         )
         self.conn.commit()
 
     def get_folder_vector(
-        self, folder_id: int, source: str, kind: str, model_id: str
+        self, folder_id: int, signal: str, vector_space: str, model_id: str
     ) -> tuple[np.ndarray, int] | None:
         row = self.conn.execute(
-            "SELECT vector, dim, n_samples FROM folder_vectors "
-            "WHERE folder_id = ? AND source = ? AND kind = ? AND model_id = ?",
-            (folder_id, source, kind, model_id),
+            "SELECT vector, dimensions, sample_count FROM folder_vectors "
+            "WHERE folder_id = ? AND signal = ? AND vector_space = ? AND model_id = ?",
+            (folder_id, signal, vector_space, model_id),
         ).fetchone()
         if not row:
             return None
-        return unpack_vector(row["vector"], row["dim"]), row["n_samples"]
+        return unpack_vector(row["vector"], row["dimensions"]), row["sample_count"]
 
-    def update_centroid(self, folder_id: int, kind: str, model_id: str, vec: np.ndarray) -> None:
+    def update_centroid(
+        self, folder_id: int, vector_space: str, model_id: str, vec: np.ndarray
+    ) -> None:
         """Anade un vector al centroide de forma incremental.
 
             c_nuevo = normalizar( (c_viejo * n + v) / (n + 1) )
@@ -381,7 +424,7 @@ class Index:
         Incremental y no recalculado: confirmar un archivo no debe obligar a
         releer la carpeta entera.
         """
-        current = self.get_folder_vector(folder_id, "centroid", kind, model_id)
+        current = self.get_folder_vector(folder_id, "centroid", vector_space, model_id)
         v = np.asarray(vec, dtype=np.float32).ravel()
         if current is None:
             new_vec, n = v, 1
@@ -389,45 +432,53 @@ class Index:
             old, n = current
             new_vec = (old * n + v) / (n + 1)
             n += 1
-        self.put_folder_vector(folder_id, "centroid", kind, model_id, new_vec, n)
+        self.put_folder_vector(folder_id, "centroid", vector_space, model_id, new_vec, n)
 
     # -- ejemplares ----------------------------------------------------------
 
     def add_exemplar(
         self,
         folder_id: int,
-        kind: str,
+        vector_space: str,
         model_id: str,
         vec: np.ndarray,
-        source_file: str | None = None,
+        source_path: str | None = None,
     ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO exemplars (folder_id, kind, model_id, dim, vector, source_file) "
+            "INSERT INTO exemplars "
+            "(folder_id, vector_space, model_id, dimensions, vector, source_path) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (folder_id, kind, model_id, int(np.size(vec)), pack_vector(vec), source_file),
+            (
+                folder_id,
+                vector_space,
+                model_id,
+                int(np.size(vec)),
+                pack_vector(vec),
+                source_path,
+            ),
         )
         self.conn.commit()
         return cur.lastrowid
 
-    def get_exemplars(self, folder_id: int, kind: str, model_id: str) -> np.ndarray:
+    def get_exemplars(self, folder_id: int, vector_space: str, model_id: str) -> np.ndarray:
         rows = list(
             self.conn.execute(
-                "SELECT vector, dim FROM exemplars "
-                "WHERE folder_id = ? AND kind = ? AND model_id = ?",
-                (folder_id, kind, model_id),
+                "SELECT vector, dimensions FROM exemplars "
+                "WHERE folder_id = ? AND vector_space = ? AND model_id = ?",
+                (folder_id, vector_space, model_id),
             )
         )
         if not rows:
             return np.empty((0, 0), dtype=np.float32)
-        return np.vstack([unpack_vector(r["vector"], r["dim"]) for r in rows])
+        return np.vstack([unpack_vector(r["vector"], r["dimensions"]) for r in rows])
 
     # -- decisiones ----------------------------------------------------------
 
     def record_decision(
         self,
-        file_id: int,
+        item_id: int,
         candidates: list[dict[str, Any]],
-        stage: str,
+        decided_by: str,
         model_id: str | None = None,
         profile: str | None = None,
     ) -> int:
@@ -445,15 +496,15 @@ class Index:
 
         cur = self.conn.execute(
             "INSERT INTO decisions "
-            "(file_id, candidates, proposed_folder_id, confidence, margin, stage, model_id, profile)"
+            "(item_id, candidates_json, proposed_folder_id, confidence, margin, decided_by, model_id, profile)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                file_id,
+                item_id,
                 json.dumps(candidates, ensure_ascii=False),
                 top["folder_id"] if top else None,
                 confidence,
                 margin,
-                stage,
+                decided_by,
                 model_id,
                 profile,
             ),
@@ -473,8 +524,8 @@ class Index:
     def pending_decisions(self) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
-                "SELECT d.*, f.path AS file_path, f.name AS file_name "
-                "FROM decisions d JOIN files f ON f.id = d.file_id "
+                "SELECT d.*, i.path AS item_path, i.name AS item_name "
+                "FROM decisions d JOIN items i ON i.id = d.item_id "
                 "WHERE d.verdict = 'pending' ORDER BY d.confidence DESC"
             )
         )
@@ -483,10 +534,10 @@ class Index:
 
     def plan_operation(
         self,
-        op: str,
-        src: str | None = None,
-        dst: str | None = None,
-        file_id: int | None = None,
+        operation: str,
+        source_path: str | None = None,
+        dest_path: str | None = None,
+        item_id: int | None = None,
         decision_id: int | None = None,
     ) -> int:
         """Registra la INTENCION antes de tocar el disco.
@@ -496,9 +547,9 @@ class Index:
         'planned' y se sabe exactamente que quedo a medias.
         """
         cur = self.conn.execute(
-            "INSERT INTO journal (op, src, dst, file_id, decision_id, state) "
+            "INSERT INTO journal (operation, source_path, dest_path, item_id, decision_id, state) "
             "VALUES (?, ?, ?, ?, ?, 'planned')",
-            (op, src, dst, file_id, decision_id),
+            (operation, source_path, dest_path, item_id, decision_id),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -521,7 +572,7 @@ class Index:
     def undoable_operations(self, limit: int = 50) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
-                "SELECT * FROM journal WHERE state = 'done' AND op IN ('move', 'rename') "
+                "SELECT * FROM journal WHERE state = 'done' AND operation IN ('move', 'rename') "
                 "ORDER BY id DESC LIMIT ?",
                 (limit,),
             )
@@ -539,10 +590,10 @@ class Index:
 
         by_status = {
             r["status"]: r["n"]
-            for r in self.conn.execute("SELECT status, COUNT(*) AS n FROM files GROUP BY status")
+            for r in self.conn.execute("SELECT status, COUNT(*) AS n FROM items GROUP BY status")
         }
         return {
-            "files": scalar("SELECT COUNT(*) FROM files"),
+            "items": scalar("SELECT COUNT(*) FROM items"),
             "by_status": by_status,
             "folders": scalar("SELECT COUNT(*) FROM folders"),
             "watched_dirs": scalar("SELECT COUNT(*) FROM watched_dirs WHERE enabled = 1"),

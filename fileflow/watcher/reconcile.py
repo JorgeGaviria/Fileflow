@@ -5,7 +5,7 @@ aplicacion estaba cerrada no genera ningun evento al abrirla. Sin este barrido,
 Fileflow solo veria lo que pasa mientras esta en ejecucion, que no es como se
 usa un ordenador de verdad.
 
-Ver docs/watcher-y-seguridad.md
+Ver docs/referencia/watcher-y-seguridad.md
 """
 
 from __future__ import annotations
@@ -56,13 +56,13 @@ def scan_directory(directory: Path, recursive: bool = True) -> list[Path]:
 
 
 def reconcile(index: Index, directories: list[Path] | None = None) -> ReconcileReport:
-    """Compara el disco contra el indice y pone al dia la tabla `files`.
+    """Compara el disco contra el indice y pone al dia la tabla `items`.
 
     | En disco | En indice | Accion                          |
     |----------|-----------|---------------------------------|
     | si       | no        | alta como 'pending'             |
-    | si       | si, distinto tamano/mtime | reanalizar    |
-    | si       | si, igual | solo actualizar last_seen       |
+    | si       | si, distinto tamano/fecha | reanalizar    |
+    | si       | si, igual | solo actualizar last_seen_at    |
     | no       | si        | marcar 'missing'                |
     """
     if directories is None:
@@ -80,7 +80,7 @@ def reconcile(index: Index, directories: list[Path] | None = None) -> ReconcileR
         for path in scan_directory(directory):
             key = str(path)
             seen.add(key)
-            existing = index.get_file_by_path(path)
+            existing = index.get_item_by_path(path)
 
             try:
                 stat = path.stat()
@@ -88,15 +88,18 @@ def reconcile(index: Index, directories: list[Path] | None = None) -> ReconcileR
                 continue
 
             if existing is None:
-                index.upsert_file(path)
+                index.upsert_item(path)
                 report.new.append(path)
-            elif existing.size != stat.st_size or abs(existing.mtime - stat.st_mtime) > 1e-6:
-                # upsert_file detecta el cambio, vuelve a 'pending' y descarta
+            elif (
+                existing.size_bytes != stat.st_size
+                or abs(existing.fs_modified_at - stat.st_mtime) > 1e-6
+            ):
+                # upsert_item detecta el cambio, vuelve a 'pending' y descarta
                 # los embeddings viejos.
-                index.upsert_file(path)
+                index.upsert_item(path)
                 report.modified.append(path)
             else:
-                index.upsert_file(path)
+                index.upsert_item(path)
                 report.unchanged += 1
 
     # Lo que estaba indexado dentro de los directorios vigilados y ya no esta.
@@ -127,7 +130,7 @@ def recover_interrupted(index: Index) -> list[dict[str, str]]:
 
     findings = []
     for row in interrupted:
-        src, dst = row["src"], row["dst"]
+        src, dst = row["source_path"], row["dest_path"]
         src_exists = Path(src).exists() if src else False
         dst_exists = Path(dst).exists() if dst else False
 
@@ -140,7 +143,7 @@ def recover_interrupted(index: Index) -> list[dict[str, str]]:
         else:
             state = "el archivo no esta en ninguno de los dos sitios"
 
-        findings.append({"journal_id": str(row["id"]), "op": row["op"], "state": state,
+        findings.append({"journal_id": str(row["id"]), "op": row["operation"], "state": state,
                          "src": src or "", "dst": dst or ""})
         log.warning("operacion #%s interrumpida: %s", row["id"], state)
 

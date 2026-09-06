@@ -1,7 +1,7 @@
 """Interfaz de linea de comandos.
 
 El nucleo tiene que ser usable sin UI: la CLI es la primera interfaz y la que
-usan las pruebas. Ver docs/arquitectura.md
+usan las pruebas. Ver docs/diseno/arquitectura.md
 """
 
 from __future__ import annotations
@@ -79,8 +79,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         # 3. Vigilancia en vivo.
         def on_file(path: Path) -> None:
-            file_id = index.upsert_file(path)
-            print(f"  + {path.name}  (id={file_id}, pendiente de analisis)")
+            item_id = index.upsert_item(path)
+            print(f"  + {path.name}  (id={item_id}, pendiente de analisis)")
 
         watcher = FileWatcher(cfg.watcher, on_file=on_file)
         for directory in directories:
@@ -113,7 +113,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Indice            {cfg.db_path}")
         print(f"Directorios       {stats['watched_dirs']}")
         print(f"Carpetas destino  {stats['folders']}")
-        print(f"Archivos          {stats['files']}")
+        print(f"Items             {stats['items']}")
         for status, count in sorted(stats["by_status"].items()):
             print(f"  {status:<14} {count}")
         print(f"Embeddings        {stats['embeddings']}")
@@ -133,7 +133,7 @@ def cmd_add_folder(args: argparse.Namespace) -> int:
             print(f"  descripcion: {args.description}")
         else:
             print("  sin descripcion -- sin ella la carpeta no puede competir mientras")
-            print("  este vacia. Ver docs/motor-de-decision.md")
+            print("  este vacia. Ver docs/diseno/motor-de-decision.md")
     return 0
 
 

@@ -55,24 +55,24 @@ def test_unpack_rechaza_dimension_incorrecta():
 
 
 def test_upsert_es_idempotente(index, sample_file):
-    first = index.upsert_file(sample_file)
-    second = index.upsert_file(sample_file)
+    first = index.upsert_item(sample_file)
+    second = index.upsert_item(sample_file)
     assert first == second
-    assert index.stats()["files"] == 1
+    assert index.stats()["items"] == 1
 
 
 def test_archivo_modificado_vuelve_a_pending(index, sample_file):
     """Si el contenido cambia, el analisis previo ya no vale."""
-    file_id = index.upsert_file(sample_file)
-    index.set_status(file_id, "proposed")
-    index.put_embedding(file_id, "text", "e5-small", np.ones(384, dtype=np.float32))
+    item_id = index.upsert_item(sample_file)
+    index.set_status(item_id, "proposed")
+    index.put_embedding(item_id, "text", "e5-small", np.ones(384, dtype=np.float32))
 
     sample_file.write_bytes(b"contenido distinto y mas largo que antes")
-    index.upsert_file(sample_file)
+    index.upsert_item(sample_file)
 
-    assert index.get_file(file_id).status == "pending"
+    assert index.get_item(item_id).status == "pending"
     # Los embeddings viejos describian otro contenido: deben desaparecer.
-    assert index.get_embedding(file_id, "text", "e5-small") is None
+    assert index.get_embedding(item_id, "text", "e5-small") is None
 
 
 # -- aislamiento entre modelos ----------------------------------------------
@@ -83,21 +83,21 @@ def test_modelos_distintos_conviven_sin_mezclarse(index, sample_file):
 
     Permite cambiar de perfil de forma incremental en vez de borrarlo todo.
     """
-    file_id = index.upsert_file(sample_file)
-    index.put_embedding(file_id, "text", "e5-small", np.ones(384, dtype=np.float32))
-    index.put_embedding(file_id, "text", "bge-m3", np.ones(1024, dtype=np.float32))
+    item_id = index.upsert_item(sample_file)
+    index.put_embedding(item_id, "text", "e5-small", np.ones(384, dtype=np.float32))
+    index.put_embedding(item_id, "text", "bge-m3", np.ones(1024, dtype=np.float32))
 
-    assert index.get_embedding(file_id, "text", "e5-small").shape == (384,)
-    assert index.get_embedding(file_id, "text", "bge-m3").shape == (1024,)
+    assert index.get_embedding(item_id, "text", "e5-small").shape == (384,)
+    assert index.get_embedding(item_id, "text", "bge-m3").shape == (1024,)
 
     ids, matrix = index.load_matrix("text", "e5-small")
     assert matrix.shape == (1, 384)  # solo el del modelo pedido
 
 
 def test_texto_e_imagen_no_se_mezclan(index, sample_file):
-    file_id = index.upsert_file(sample_file)
-    index.put_embedding(file_id, "text", "m", np.ones(384, dtype=np.float32))
-    index.put_embedding(file_id, "image", "m", np.ones(512, dtype=np.float32))
+    item_id = index.upsert_item(sample_file)
+    index.put_embedding(item_id, "text", "m", np.ones(384, dtype=np.float32))
+    index.put_embedding(item_id, "image", "m", np.ones(512, dtype=np.float32))
 
     _, text_matrix = index.load_matrix("text", "m")
     _, image_matrix = index.load_matrix("image", "m")
@@ -127,7 +127,7 @@ def test_descripcion_y_centroide_son_independientes(index, tmp_path):
     """Las dos senales del scoring conviven sin pisarse."""
     folder_id = index.add_folder(tmp_path / "docs", "documentos")
     index.put_folder_vector(folder_id, "description", "text", "m", np.array([1.0, 0.0]))
-    index.put_folder_vector(folder_id, "centroid", "text", "m", np.array([0.0, 1.0]), n_samples=5)
+    index.put_folder_vector(folder_id, "centroid", "text", "m", np.array([0.0, 1.0]), sample_count=5)
 
     desc, _ = index.get_folder_vector(folder_id, "description", "text", "m")
     cent, n = index.get_folder_vector(folder_id, "centroid", "text", "m")
@@ -142,14 +142,14 @@ def test_descripcion_y_centroide_son_independientes(index, tmp_path):
 def test_decision_guarda_todos_los_candidatos(index, sample_file, tmp_path):
     """Guardar solo el elegido impediria distinguir un fallo de calibracion
     de uno de representacion."""
-    file_id = index.upsert_file(sample_file)
+    item_id = index.upsert_item(sample_file)
     a = index.add_folder(tmp_path / "facturas", "facturas")
     b = index.add_folder(tmp_path / "contratos", "contratos")
 
     decision_id = index.record_decision(
-        file_id,
+        item_id,
         [{"folder_id": a, "score": 0.82}, {"folder_id": b, "score": 0.61}],
-        stage="semantic",
+        decided_by="semantic",
         model_id="e5-small",
     )
 
@@ -161,10 +161,10 @@ def test_decision_guarda_todos_los_candidatos(index, sample_file, tmp_path):
 
 
 def test_correccion_del_usuario(index, sample_file, tmp_path):
-    file_id = index.upsert_file(sample_file)
+    item_id = index.upsert_item(sample_file)
     a = index.add_folder(tmp_path / "a", "a")
     b = index.add_folder(tmp_path / "b", "b")
-    decision_id = index.record_decision(file_id, [{"folder_id": a, "score": 0.9}], stage="semantic")
+    decision_id = index.record_decision(item_id, [{"folder_id": a, "score": 0.9}], decided_by="semantic")
 
     index.settle_decision(decision_id, "corrected", b)
 
@@ -182,8 +182,8 @@ def test_correccion_del_usuario(index, sample_file, tmp_path):
 def test_journal_registra_la_intencion_antes_de_actuar(index, sample_file):
     """La entrada existe en 'planned' antes de tocar el disco: si el proceso
     muere a mitad, se sabe que quedo pendiente."""
-    file_id = index.upsert_file(sample_file)
-    journal_id = index.plan_operation("move", src="/a/x.pdf", dst="/b/x.pdf", file_id=file_id)
+    item_id = index.upsert_item(sample_file)
+    journal_id = index.plan_operation("move", source_path="/a/x.pdf", dest_path="/b/x.pdf", item_id=item_id)
 
     assert [r["id"] for r in index.interrupted_operations()] == [journal_id]
 
@@ -193,7 +193,7 @@ def test_journal_registra_la_intencion_antes_de_actuar(index, sample_file):
 
 
 def test_operacion_deshecha_sale_de_la_lista(index):
-    journal_id = index.plan_operation("move", src="/a/x", dst="/b/x")
+    journal_id = index.plan_operation("move", source_path="/a/x", dest_path="/b/x")
     index.complete_operation(journal_id)
     index.mark_undone(journal_id)
     assert index.undoable_operations() == []
@@ -201,7 +201,7 @@ def test_operacion_deshecha_sale_de_la_lista(index):
 
 def test_operacion_fallida_no_es_deshacible(index):
     """Lo que nunca se ejecuto no hay que deshacerlo."""
-    journal_id = index.plan_operation("move", src="/a/x", dst="/b/x")
+    journal_id = index.plan_operation("move", source_path="/a/x", dest_path="/b/x")
     index.complete_operation(journal_id, error="archivo bloqueado")
     assert index.undoable_operations() == []
 
@@ -209,13 +209,13 @@ def test_operacion_fallida_no_es_deshacible(index):
 def test_estados_invalidos_se_rechazan(index, sample_file):
     """Los seis estados son un contrato cerrado. Un typo debe fallar en el
     momento, no escribir basura que rompa mucho despues y lejos."""
-    file_id = index.upsert_file(sample_file)
+    item_id = index.upsert_item(sample_file)
     for valido in ("pending", "proposed", "moved", "ignored", "missing", "error"):
-        index.set_status(file_id, valido)
+        index.set_status(item_id, valido)
 
     for invalido in ("analyzed", "unstable", "Pending", ""):
         with pytest.raises(sqlite3.IntegrityError):
-            index.set_status(file_id, invalido)
+            index.set_status(item_id, invalido)
 
 
 def test_politica_de_subcarpetas(index, tmp_path):
@@ -224,10 +224,27 @@ def test_politica_de_subcarpetas(index, tmp_path):
     d = tmp_path / "descargas"
     d.mkdir()
     index.add_watched_dir(d)
-    assert index.list_watched_dirs()[0]["subdirs"] == "unit"
+    assert index.list_watched_dirs()[0]["subdir_policy"] == "unit"
 
-    index.add_watched_dir(d, subdirs="descend")
-    assert index.list_watched_dirs()[0]["subdirs"] == "descend"
+    index.add_watched_dir(d, subdir_policy="descend")
+    assert index.list_watched_dirs()[0]["subdir_policy"] == "descend"
 
     with pytest.raises(sqlite3.IntegrityError):
-        index.add_watched_dir(tmp_path / "otra", subdirs="recursivo")
+        index.add_watched_dir(tmp_path / "otra", subdir_policy="recursivo")
+
+
+def test_indice_de_otra_version_falla_con_mensaje_claro(tmp_path):
+    """El fallo debe salir al ABRIR, diciendo que pasa.
+
+    Con CREATE TABLE IF NOT EXISTS, una base vieja conserva sus tablas y sin
+    esta comprobacion el error aparece mucho despues como un 'no such column'
+    que no explica nada.
+    """
+    from fileflow.db import index as mod
+
+    db = tmp_path / "viejo.db"
+    with Index(db) as idx:
+        idx.set_meta("schema_version", "1")
+
+    with pytest.raises(RuntimeError, match="version 1 del esquema"):
+        Index(db)

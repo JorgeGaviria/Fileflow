@@ -12,7 +12,7 @@ erDiagram
     watched_dirs {
         int id PK
         text path UK "de donde salen los archivos"
-        text subdirs "unit, ignore o descend"
+        text subdir_policy "unit, ignore o descend"
         bool enabled
     }
 
@@ -27,52 +27,53 @@ erDiagram
         bool enabled
     }
 
-    files {
+    items {
         int id PK
-        text kind "file o dir"
-        int n_children "solo dir"
+        text item_type "file o dir"
+        int child_count "solo dir"
         text path UK "ruta ACTUAL"
         text name
-        text ext
-        int size
-        real btime "creacion"
-        real mtime "modificacion"
+        text extension
+        int size_bytes
+        real fs_created_at "creacion"
+        real fs_modified_at "modificacion"
         text content_hash "archivo o listado"
         text status "6 estados"
-        int folder_id FK "destino, NULL si sin clasificar"
-        text first_seen "Fileflow lo vio"
-        text filed_at "Fileflow lo movio"
+        int folder_id FK "destino, NULL sin clasificar"
+        text first_seen_at "Fileflow lo vio"
+        text organized_at "Fileflow lo movio"
     }
 
     embeddings {
-        int file_id PK "FK a files"
-        text kind PK "text o image"
+        int item_id PK "FK a items"
+        text vector_space PK "text o image"
         text model_id PK "nunca se mezclan"
-        int dim
+        int dimensions
         blob vector "float32 norma 1"
     }
 
     folder_vectors {
         int folder_id PK "FK a folders"
-        text source PK "description o centroid"
-        text kind PK
+        text signal PK "description o centroid"
+        text vector_space PK
         text model_id PK
-        int dim
+        int dimensions
         blob vector
-        int n_samples "alimenta beta"
+        int sample_count "alimenta beta"
     }
 
     exemplars {
         int id PK
         int folder_id FK
-        text kind
+        text vector_space
         text model_id
         blob vector
+        text source_path
     }
 
     rules {
         int id PK
-        text kind "ext, glob o regex"
+        text match_type "extension, glob o regex"
         text pattern
         int folder_id FK
         int priority
@@ -80,22 +81,22 @@ erDiagram
 
     decisions {
         int id PK
-        int file_id FK
-        text candidates "JSON top-5 con scores"
+        int item_id FK
+        text candidates_json "top-5 con scores"
         int proposed_folder_id FK
         real confidence
         real margin "score1 menos score2"
-        text stage
+        text decided_by "rule, semantic, llm o fallback"
         text verdict
         int final_folder_id FK
     }
 
     journal {
         int id PK
-        text op "move, rename, mkdir o trash"
-        text src
-        text dst
-        int file_id FK
+        text operation "move, rename, mkdir o trash"
+        text source_path
+        text dest_path
+        int item_id FK
         int decision_id FK
         text state "planned, done, failed o undone"
     }
@@ -106,20 +107,20 @@ erDiagram
     }
 
     folders ||--o{ folders : "contiene"
-    folders ||--o{ files : "alberga"
+    folders ||--o{ items : "alberga"
     folders ||--o{ folder_vectors : "se representa con"
     folders ||--o{ exemplars : "aprende de"
     folders ||--o{ rules : "es destino de"
     folders ||--o{ decisions : "es propuesta en"
-    files ||--o{ embeddings : "se vectoriza en"
-    files ||--o{ decisions : "genera"
-    files ||--o{ journal : "se mueve en"
+    items ||--o{ embeddings : "se vectoriza en"
+    items ||--o{ decisions : "genera"
+    items ||--o{ journal : "se mueve en"
     decisions ||--o{ journal : "ejecuta"
 ```
 
 ## Cómo leerlo
 
-**`folders` y `files` son los dos centros de gravedad.** Todo lo demás cuelga de uno de los
+**`folders` e `items` son los dos centros de gravedad.** Todo lo demás cuelga de uno de los
 dos, salvo `journal`, que cuelga de ambos porque registra precisamente el acto de unirlos:
 mover un archivo a una carpeta.
 
@@ -128,7 +129,7 @@ mover un archivo a una carpeta.
 distintos aunque ambos guarden rutas.
 
 **Las claves primarias compuestas cuentan la historia importante.** En `embeddings` la clave
-es `(file_id, kind, model_id)`, no solo `file_id`. Eso permite que un mismo archivo tenga a
+es `(item_id, vector_space, model_id)`, no solo `item_id`. Eso permite que un mismo archivo tenga a
 la vez su vector de `e5-small` y el de `bge-m3` sin pisarse, que es lo que hace posible
 cambiar de perfil de hardware sin borrar el índice entero. Lo mismo en `folder_vectors`,
-donde `source` separa la descripción del centroide: las dos señales del scoring.
+donde `signal` separa la descripción del centroide: las dos señales del scoring.
