@@ -192,11 +192,87 @@ def test_journal_registra_la_intencion_antes_de_actuar(index, sample_file):
     assert [r["id"] for r in index.undoable_operations()] == [journal_id]
 
 
-def test_operacion_deshecha_sale_de_la_lista(index):
-    journal_id = index.plan_operation("move", source_path="/a/x", dest_path="/b/x")
-    index.complete_operation(journal_id)
-    index.mark_undone(journal_id)
+def test_deshacer_no_tacha_la_entrada_vieja_sino_que_anade_una(index):
+    """El journal es append-only. Deshacer es una operacion real sobre el disco
+    que puede fallar, asi que se registra como cualquier otra. Si solo se
+    tachara la vieja, el journal diria que el archivo esta en B cuando ya
+    volvio a A."""
+    original = index.plan_operation("move", source_path="/a/x.pdf", dest_path="/b/x.pdf")
+    index.complete_operation(original)
+
+    deshacer = index.plan_undo(original)
+    fila = index.conn.execute("SELECT * FROM journal WHERE id = ?", (deshacer,)).fetchone()
+
+    assert fila["undoes_id"] == original
+    assert fila["source_path"] == "/b/x.pdf"   # invertidas
+    assert fila["dest_path"] == "/a/x.pdf"
+
+    # Mientras el undo no se ejecute, la original sigue siendo deshacible.
+    assert [r["id"] for r in index.undoable_operations()] == [original]
+    index.complete_operation(deshacer)
     assert index.undoable_operations() == []
+
+
+def test_un_undo_fallido_deja_rastro(index):
+    """Es justo lo que antes se perdia: si el movimiento de vuelta falla, tiene
+    que quedar escrito que se intento."""
+    original = index.plan_operation("move", source_path="/a/x", dest_path="/b/x")
+    index.complete_operation(original)
+    deshacer = index.plan_undo(original)
+    index.complete_operation(deshacer, error="archivo bloqueado")
+
+    fila = index.conn.execute("SELECT * FROM journal WHERE id = ?", (deshacer,)).fetchone()
+    assert fila["state"] == "failed"
+    assert fila["error"] == "archivo bloqueado"
+    # Y como no salio bien, la original sigue pendiente de deshacer.
+    assert [r["id"] for r in index.undoable_operations()] == [original]
+
+
+def test_deshacer_un_lote_completo(index):
+    """Confirmar 30 archivos y arrepentirse: sin batch_id habria que
+    deshacerlos de uno en uno."""
+    for n in range(3):
+        jid = index.plan_operation("move", source_path=f"/a/{n}", dest_path=f"/b/{n}",
+                                   batch_id="lote-1")
+        index.complete_operation(jid)
+    otro = index.plan_operation("move", source_path="/c/x", dest_path="/d/x",
+                                batch_id="lote-2")
+    index.complete_operation(otro)
+
+    lote = index.batch_operations("lote-1")
+    assert len(lote) == 3
+    # En orden inverso: al deshacer, lo ultimo hecho es lo primero en revertirse.
+    assert [r["source_path"] for r in lote] == ["/a/2", "/a/1", "/a/0"]
+
+
+def test_la_papelera_no_se_puede_deshacer(index):
+    """Mandar algo a la papelera de Windows es facil, sacarlo con codigo no.
+    Mejor decirlo que ofrecer un undo que va a fallar."""
+    jid = index.plan_operation("trash", source_path="/a/x")
+    index.complete_operation(jid)
+
+    assert index.undoable_operations() == []
+    with pytest.raises(ValueError, match="no se puede deshacer"):
+        index.plan_undo(jid)
+
+
+def test_no_se_deshace_lo_que_no_llego_a_ejecutarse(index):
+    jid = index.plan_operation("move", source_path="/a/x", dest_path="/b/x")
+    with pytest.raises(ValueError, match="planned"):
+        index.plan_undo(jid)
+
+
+def test_historial_de_un_archivo(index, sample_file):
+    """La consulta natural de la interfaz: que le ha pasado a esto."""
+    item_id = index.upsert_item(sample_file)
+    primero = index.plan_operation("move", source_path="/a", dest_path="/b", item_id=item_id)
+    index.complete_operation(primero)
+    segundo = index.plan_undo(primero)
+    index.complete_operation(segundo)
+
+    historial = index.item_history(item_id)
+    assert [r["id"] for r in historial] == [primero, segundo]
+    assert historial[1]["undoes_id"] == primero
 
 
 def test_operacion_fallida_no_es_deshacible(index):

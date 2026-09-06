@@ -359,22 +359,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_una_pendiente
 -- Escribir la intencion antes y no despues es lo que lo hace util: si el
 -- proceso muere a mitad, quedan entradas en 'planned' y se sabe exactamente
 -- que quedo a medias y donde mirar.
+--
+-- ES UN REGISTRO APPEND-ONLY. Deshacer no modifica la entrada vieja: crea una
+-- NUEVA con las rutas invertidas y undoes_id apuntando a la original.
+--
+--   Antes se marcaba la entrada como 'undone' y ya. Pero el movimiento de
+--   vuelta es una operacion real sobre el disco, que puede fallar, y no
+--   quedaba registrada en ninguna parte: justo un agujero en el mecanismo que
+--   existe para que no haya agujeros. Ademas el journal mentia -- decia que el
+--   archivo estaba en B cuando habia vuelto a A -- y no permitia rehacer.
+--
+--   Por eso 'undone' ya no es un estado. state describe el ciclo de vida de
+--   ESTA operacion (planned -> done | failed). Si una operacion fue revertida
+--   se deduce: existe otra entrada con undoes_id apuntando a ella y state
+--   'done'.
+--
+-- batch_id agrupa las operaciones de una misma confirmacion. Sin el no se
+-- puede deshacer un lote: confirmar 30 archivos de la bandeja y arrepentirse
+-- obligaria a deshacerlos de uno en uno, o por ventana de tiempo arriesgandose
+-- a llevarse por delante lo anterior.
+--
+-- 'trash' NO es reversible: mandar algo a la papelera de Windows es facil,
+-- sacarlo con codigo no. Se excluye de las operaciones deshacibles en vez de
+-- ofrecer un undo que va a fallar.
+--
+-- LIMITACION CONOCIDA de v1: al deshacer se comprueba que el archivo sigue en
+-- el destino y que el origen esta libre, pero no que sea EL MISMO archivo. Si
+-- el usuario lo sustituyo por otro con el mismo nombre, el undo devuelve el
+-- equivocado. Se resolveria guardando su huella al mover; se deja fuera de v1
+-- a proposito.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS journal (
     id           INTEGER PRIMARY KEY,
+    batch_id     TEXT,                      -- agrupa una misma confirmacion
     operation    TEXT    NOT NULL
-                 CHECK (operation IN ('move', 'rename', 'mkdir', 'trash')),
+                 CHECK (operation IN ('move', 'rename', 'mkdir', 'rmdir', 'trash')),
     source_path  TEXT,
     dest_path    TEXT,
     item_id      INTEGER REFERENCES items(id) ON DELETE SET NULL,
     decision_id  INTEGER REFERENCES decisions(id) ON DELETE SET NULL,
+    undoes_id    INTEGER REFERENCES journal(id),  -- si esta entrada revierte otra
     state        TEXT    NOT NULL DEFAULT 'planned'
-                 CHECK (state IN ('planned', 'done', 'failed', 'undone')),
+                 CHECK (state IN ('planned', 'done', 'failed')),
     error        TEXT,
     created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-    done_at      TEXT,
-    undone_at    TEXT
+    done_at      TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_journal_state ON journal(state);
-CREATE INDEX IF NOT EXISTS idx_journal_time  ON journal(created_at);
+CREATE INDEX IF NOT EXISTS idx_journal_state  ON journal(state);
+CREATE INDEX IF NOT EXISTS idx_journal_time   ON journal(created_at);
+CREATE INDEX IF NOT EXISTS idx_journal_batch  ON journal(batch_id);
+CREATE INDEX IF NOT EXISTS idx_journal_undoes ON journal(undoes_id);
+
+-- "Que le ha pasado a este archivo?" es la consulta natural de la interfaz.
+CREATE INDEX IF NOT EXISTS idx_journal_item   ON journal(item_id);

@@ -101,7 +101,7 @@ usa un ordenador de verdad.
 **Toda** operación pasa por la tabla `journal`, y siempre en este orden:
 
 ```
-1. Escribir la intención     journal(op='move', src=..., dst=..., state='planned')
+1. Escribir la intención     journal(operation='move', source_path=..., state='planned')
 2. Ejecutar en disco
 3. Marcar el resultado       state='done'  (o 'failed' + error)
 ```
@@ -113,19 +113,56 @@ justo cuando hace falta.
 
 ## Undo
 
-Cada entrada `done` es reversible:
-
 ```bash
-python -m fileflow undo --last          # deshacer el ultimo movimiento
-python -m fileflow undo --session <id>  # deshacer un lote completo
-python -m fileflow undo --since 1h      # deshacer por ventana de tiempo
+python -m fileflow undo --last            # deshacer la última operación
+python -m fileflow undo --batch <id>      # deshacer un lote completo
+python -m fileflow undo --since 1h        # deshacer por ventana de tiempo
 ```
 
-Deshacer un `move` es moverlo de vuelta a `src`. Antes se verifica que el archivo sigue en
-`dst` y que `src` está libre; si no, se avisa en vez de forzar.
+Deshacer un `move` es moverlo de vuelta. Antes se verifica que el archivo sigue en el
+destino y que el origen está libre; si no, se avisa en vez de forzar.
 
 El undo **está disponible siempre**, también en modo automático. Es precisamente en
 automático donde más falta hace.
+
+### Deshacer también se apunta
+
+El journal es un **registro append-only**: deshacer no modifica la entrada vieja, sino que
+**crea una nueva** con las rutas invertidas y `undoes_id` apuntando a la original.
+
+Puede parecer un rodeo, pero el movimiento de vuelta es una operación real sobre el disco,
+que puede fallar. Marcando la entrada vieja como "deshecha" y ya, esa segunda operación no
+quedaba registrada en ninguna parte — un agujero justo en el mecanismo que existe para que
+no haya agujeros. Y el journal mentía: decía que el archivo estaba en el destino cuando ya
+había vuelto al origen.
+
+Como consecuencia, **"deshecha" deja de ser un estado**. `state` describe el ciclo de vida
+de *esa* operación (`planned` → `done` | `failed`); que haya sido revertida se deduce de
+que exista otra entrada que la revierta y haya salido bien.
+
+### Lotes
+
+`batch_id` agrupa las operaciones de una misma confirmación. Es el caso más común: aceptas
+30 archivos de la bandeja, ves que la propuesta era mala, y quieres deshacer **eso** — no
+30 veces `--last`, ni una ventana de tiempo que se lleve por delante lo anterior.
+
+Un lote se revierte **del final al principio**: si se creó una carpeta y luego se movieron
+archivos dentro, primero salen los archivos y después se quita la carpeta.
+
+### Lo que no se puede deshacer
+
+**`trash` no es reversible.** Mandar algo a la papelera de Windows es fácil; sacarlo con
+código, no. Se excluye explícitamente de las operaciones deshacibles en vez de ofrecer un
+undo que va a fallar.
+
+### Limitación conocida de v1
+
+Al deshacer se comprueba que el archivo sigue en el destino y que el origen está libre,
+pero **no que sea el mismo archivo**. Si el usuario lo sustituyó por otro con el mismo
+nombre, el undo devolvería el equivocado.
+
+Se resolvería guardando la huella del archivo al moverlo. Se deja fuera de v1 a propósito,
+y queda escrito aquí para que sea una decisión y no un descuido.
 
 ## Casos límite que hay que respetar
 

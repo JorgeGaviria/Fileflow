@@ -96,12 +96,14 @@ erDiagram
 
     journal {
         int id PK
-        text operation "move, rename, mkdir o trash"
+        text batch_id "agrupa una confirmacion"
+        text operation "move, rename, mkdir, rmdir o trash"
         text source_path
         text dest_path
         int item_id FK
         int decision_id FK
-        text state "planned, done, failed o undone"
+        int undoes_id FK "si revierte otra entrada"
+        text state "planned, done o failed"
     }
 
     meta {
@@ -119,6 +121,7 @@ erDiagram
     items ||--o{ decisions : "genera"
     items ||--o{ journal : "se mueve en"
     decisions ||--o{ journal : "ejecuta"
+    journal ||--o{ journal : "deshace"
 ```
 
 > **Fileflow no hace `DELETE` de sus propias entidades.** `items`, `folders` y
@@ -135,6 +138,11 @@ mover un archivo a una carpeta.
 **`watched_dirs` y `meta` son islas**, sin ninguna relación. Es correcto y deliberado:
 `watched_dirs` dice *de dónde* vienen los archivos y `folders` *a dónde* van. Son conceptos
 distintos aunque ambos guarden rutas.
+
+**El journal es append-only.** Deshacer no tacha la entrada vieja: añade una nueva con las
+rutas invertidas y `undoes_id` apuntando a la original — por eso `journal` también se
+referencia a sí misma. Así el registro cuenta la historia completa, incluidos los intentos
+de deshacer que fallaron, en vez de decir que un archivo está en B cuando ya volvió a A.
 
 **Una decision pendiente por item.** Las varias sugerencias son el top-5 dentro de
 `candidates_json`, no varias filas: la bandeja muestra cada archivo una vez con sus

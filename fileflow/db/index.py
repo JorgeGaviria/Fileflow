@@ -22,7 +22,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 
-SCHEMA_VERSION = 4  # extractor, polaridad de ejemplares, excepciones
+SCHEMA_VERSION = 5  # journal append-only, lotes, operaciones inversas
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -632,6 +632,13 @@ class Index:
 
     # -- journal -------------------------------------------------------------
 
+    # Operaciones que se pueden revertir. 'trash' queda fuera: mandar algo a la
+    # papelera de Windows es facil, sacarlo con codigo no.
+    UNDOABLE = ("move", "rename", "mkdir")
+
+    # La inversa de cada una.
+    INVERSE = {"move": "move", "rename": "rename", "mkdir": "rmdir"}
+
     def plan_operation(
         self,
         operation: str,
@@ -639,17 +646,24 @@ class Index:
         dest_path: str | None = None,
         item_id: int | None = None,
         decision_id: int | None = None,
+        batch_id: str | None = None,
+        undoes_id: int | None = None,
     ) -> int:
         """Registra la INTENCION antes de tocar el disco.
 
         Escribir antes y no despues es lo que hace util al journal: si el
         proceso muere a mitad de un movimiento, al arrancar quedan entradas en
         'planned' y se sabe exactamente que quedo a medias.
+
+        batch_id agrupa las operaciones de una misma confirmacion, para poder
+        deshacer un lote entero.
         """
         cur = self.conn.execute(
-            "INSERT INTO journal (operation, source_path, dest_path, item_id, decision_id, state) "
-            "VALUES (?, ?, ?, ?, ?, 'planned')",
-            (operation, source_path, dest_path, item_id, decision_id),
+            "INSERT INTO journal "
+            "(batch_id, operation, source_path, dest_path, item_id, decision_id, "
+            " undoes_id, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'planned')",
+            (batch_id, operation, source_path, dest_path, item_id, decision_id, undoes_id),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -662,19 +676,74 @@ class Index:
         )
         self.conn.commit()
 
-    def mark_undone(self, journal_id: int) -> None:
-        self.conn.execute(
-            "UPDATE journal SET state = 'undone', undone_at = datetime('now') WHERE id = ?",
-            (journal_id,),
+    def plan_undo(self, journal_id: int, batch_id: str | None = None) -> int:
+        """Planifica la operacion INVERSA de una entrada ya ejecutada.
+
+        No modifica la entrada original: el journal es append-only. Deshacer es
+        una operacion real sobre el disco, que puede fallar, y como tal se
+        registra antes de ejecutarse igual que cualquier otra. Asi el journal
+        cuenta la historia completa en vez de decir que un archivo esta en B
+        cuando ya volvio a A.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM journal WHERE id = ?", (journal_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no existe la operacion #{journal_id}")
+        if row["state"] != "done":
+            raise ValueError(f"la operacion #{journal_id} esta en '{row['state']}', no en 'done'")
+        if row["operation"] not in self.UNDOABLE:
+            raise ValueError(f"'{row['operation']}' no se puede deshacer")
+
+        return self.plan_operation(
+            operation=self.INVERSE[row["operation"]],
+            source_path=row["dest_path"],      # invertidas
+            dest_path=row["source_path"],
+            item_id=row["item_id"],
+            decision_id=row["decision_id"],
+            batch_id=batch_id,
+            undoes_id=journal_id,
         )
-        self.conn.commit()
 
     def undoable_operations(self, limit: int = 50) -> list[sqlite3.Row]:
+        """Operaciones ejecutadas que aun no se han revertido.
+
+        Que una operacion este deshecha no es un estado suyo: se deduce de que
+        exista otra entrada que la revierta y haya salido bien.
+        """
+        placeholders = ",".join("?" * len(self.UNDOABLE))
         return list(
             self.conn.execute(
-                "SELECT * FROM journal WHERE state = 'done' AND operation IN ('move', 'rename') "
-                "ORDER BY id DESC LIMIT ?",
-                (limit,),
+                f"SELECT * FROM journal j WHERE j.state = 'done' "
+                f"  AND j.operation IN ({placeholders}) "
+                f"  AND j.undoes_id IS NULL "
+                f"  AND NOT EXISTS ("
+                f"    SELECT 1 FROM journal u "
+                f"    WHERE u.undoes_id = j.id AND u.state = 'done') "
+                f"ORDER BY j.id DESC LIMIT ?",
+                (*self.UNDOABLE, limit),
+            )
+        )
+
+    def batch_operations(self, batch_id: str) -> list[sqlite3.Row]:
+        """Las operaciones de una confirmacion, en orden inverso.
+
+        Para deshacer un lote hay que revertirlo del final al principio: si se
+        creo una carpeta y luego se movieron archivos dentro, primero salen los
+        archivos y despues se quita la carpeta.
+        """
+        return list(
+            self.conn.execute(
+                "SELECT * FROM journal WHERE batch_id = ? AND state = 'done' ORDER BY id DESC",
+                (batch_id,),
+            )
+        )
+
+    def item_history(self, item_id: int) -> list[sqlite3.Row]:
+        """Todo lo que le ha pasado a un item, en orden."""
+        return list(
+            self.conn.execute(
+                "SELECT * FROM journal WHERE item_id = ? ORDER BY id", (item_id,)
             )
         )
 

@@ -289,6 +289,15 @@ absoluto sea alto.
 lo que lo hace útil: si el proceso muere a mitad, quedan entradas en `planned` y se sabe
 exactamente qué quedó a medias.
 
+Es un **registro append-only**: deshacer no modifica la entrada vieja, crea una nueva con
+las rutas invertidas y `undoes_id` apuntando a la original. Por eso `undone` no es un
+estado — `state` describe el ciclo de vida de *esa* operación, y que haya sido revertida se
+deduce de que exista otra entrada que la revierta.
+
+`batch_id` agrupa una misma confirmación, que es lo que permite deshacer un lote entero en
+vez de operación por operación. Y `trash` queda fuera de las operaciones reversibles:
+sacar algo de la papelera de Windows con código no es viable.
+
 Ver [watcher y seguridad](watcher-y-seguridad.md) para el protocolo completo y el undo.
 
 ---
