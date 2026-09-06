@@ -196,11 +196,20 @@ CREATE INDEX IF NOT EXISTS idx_items_type   ON items(item_type);
 --
 -- vector_space separa el espacio de texto del de imagen. Se llamaba 'kind',
 -- pero ese nombre significaba tres cosas distintas en tres tablas.
+--
+-- extractor identifica CON QUE RECETA se obtuvo el contenido antes de
+-- vectorizarlo ('pdf-text-v1', 'docx-v1', 'image-clip-v1'...). Un vector no
+-- solo caduca si cambia el modelo: si manana el extractor de PDF aprende a
+-- hacer OCR, todos los vectores de PDF escaneados pasan a ser basura -- se
+-- generaron a partir de un texto vacio -- aunque el modelo sea el mismo.
+-- Va como columna normal y no en la clave: de una receta vieja no queremos
+-- conservar nada, queremos detectarla y regenerar.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS embeddings (
     item_id      INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
     vector_space TEXT    NOT NULL,          -- 'text' | 'image'
     model_id     TEXT    NOT NULL,
+    extractor    TEXT    NOT NULL DEFAULT '',
     dimensions   INTEGER NOT NULL,
     vector       BLOB    NOT NULL,          -- float32 little-endian, norma 1
     created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -239,9 +248,26 @@ CREATE TABLE IF NOT EXISTS folder_vectors (
 -- ejemplares se puntuan por MAXIMA similitud. Una correccion tiene que poder
 -- cambiar el resultado ella sola.
 -- ---------------------------------------------------------------------------
+-- polarity guarda las DOS mitades de cada correccion. Si Fileflow propuso
+-- /contratos y el usuario lo movio a /facturas, aprendemos que si va en
+-- /facturas (positivo) y que no iba en /contratos (negativo).
+--
+--   Los positivos y los negativos NO valen lo mismo. Un positivo dice "esto se
+--   parece a aquello" y generaliza bien. Un negativo puede ser una excepcion
+--   disfrazada de regla: quiza esa factura fue a /impuestos solo porque el
+--   usuario estaba haciendo la declaracion, y penalizar /facturas por eso
+--   estropearia las siguientes.
+--
+--   Por eso en v1 los negativos se GUARDAN pero NO entran en el scoring. Se
+--   usan para calibrar el umbral de la carpeta: si /contratos acumula muchas
+--   propuestas rechazadas, lo que hay que subir es su umbral, no penalizar
+--   archivo por archivo. Ver docs/diseno/motor-de-decision.md
+-- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS exemplars (
     id           INTEGER PRIMARY KEY,
     folder_id    INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    polarity     TEXT    NOT NULL DEFAULT 'positive'
+                 CHECK (polarity IN ('positive', 'negative')),
     vector_space TEXT    NOT NULL,
     model_id     TEXT    NOT NULL,
     dimensions   INTEGER NOT NULL,
@@ -252,6 +278,12 @@ CREATE TABLE IF NOT EXISTS exemplars (
 
 CREATE INDEX IF NOT EXISTS idx_exemplars_folder
     ON exemplars(folder_id, model_id, vector_space);
+
+-- Higiene, no correccion: como los ejemplares se puntuan por MAXIMA similitud,
+-- tener el mismo vector cinco veces da el mismo maximo que tenerlo una. Solo
+-- gasta espacio y tiempo. Importaria si algun dia se promediaran.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exemplars_unicos
+    ON exemplars(folder_id, source_path, vector_space, model_id, polarity);
 
 -- ---------------------------------------------------------------------------
 -- Reglas rapidas (etapa 1 del pipeline). priority mayor gana; las que crea el
@@ -268,6 +300,12 @@ CREATE TABLE IF NOT EXISTS rules (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Un patron, un destino. Sin esto se pueden crear dos reglas con el mismo
+-- patron y la misma prioridad apuntando a carpetas distintas, y entonces gana
+-- la que salga primero, que es azar. Para cambiar el destino se edita la
+-- regla, no se crea una segunda.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_patron ON rules(match_type, pattern);
+
 -- ---------------------------------------------------------------------------
 -- Decisiones: que se propuso y que paso.
 --
@@ -278,6 +316,12 @@ CREATE TABLE IF NOT EXISTS rules (
 --
 -- decided_by dice que etapa del pipeline resolvio: regla rapida, similitud
 -- semantica, LLM o descarte por defecto.
+--
+-- is_exception distingue "te equivocaste" de "esta vez quiero otra cosa". Al
+-- corregir, el usuario elige entre 'solo este archivo' y 'siempre que se
+-- parezca'. Una excepcion no genera ejemplar y no cuenta como desacuerdo en
+-- las metricas: mover una factura a /impuestos porque toca la declaracion no
+-- significa que /facturas estuviera mal.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS decisions (
     id                 INTEGER PRIMARY KEY,
@@ -292,6 +336,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     profile            TEXT,
     verdict            TEXT    NOT NULL DEFAULT 'pending'
                        CHECK (verdict IN ('pending', 'accepted', 'corrected', 'rejected')),
+    is_exception       INTEGER NOT NULL DEFAULT 0,
     final_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
     decided_at         TEXT
@@ -299,6 +344,13 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE INDEX IF NOT EXISTS idx_decisions_verdict ON decisions(verdict);
 CREATE INDEX IF NOT EXISTS idx_decisions_item    ON decisions(item_id);
+
+-- Una sola decision pendiente por item. Las "varias sugerencias" son el top-5
+-- dentro de candidates_json, no varias filas: la bandeja debe mostrar cada
+-- archivo UNA vez con sus alternativas, no dos veces con destinos que se
+-- contradicen.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_una_pendiente
+    ON decisions(item_id) WHERE verdict = 'pending';
 
 -- ---------------------------------------------------------------------------
 -- Journal: toda operacion sobre el sistema de archivos pasa por aqui, ANTES

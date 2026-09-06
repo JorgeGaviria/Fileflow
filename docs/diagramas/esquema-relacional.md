@@ -48,6 +48,7 @@ erDiagram
         int item_id PK "FK a items"
         text vector_space PK "text o image"
         text model_id PK "nunca se mezclan"
+        text extractor "receta de extraccion"
         int dimensions
         blob vector "float32 norma 1"
     }
@@ -65,6 +66,7 @@ erDiagram
     exemplars {
         int id PK
         int folder_id FK
+        text polarity "positive o negative"
         text vector_space
         text model_id
         blob vector
@@ -88,6 +90,7 @@ erDiagram
         real margin "score1 menos score2"
         text decided_by "rule, semantic, llm o fallback"
         text verdict
+        bool is_exception "solo esta vez"
         int final_folder_id FK
     }
 
@@ -132,6 +135,10 @@ mover un archivo a una carpeta.
 **`watched_dirs` y `meta` son islas**, sin ninguna relación. Es correcto y deliberado:
 `watched_dirs` dice *de dónde* vienen los archivos y `folders` *a dónde* van. Son conceptos
 distintos aunque ambos guarden rutas.
+
+**Una decision pendiente por item.** Las varias sugerencias son el top-5 dentro de
+`candidates_json`, no varias filas: la bandeja muestra cada archivo una vez con sus
+alternativas, no dos veces con destinos que se contradicen.
 
 **El `status` sustituye al borrado.** Quitar una carpeta no destruye lo que Fileflow
 aprendió de ella: al volver a añadirla se reactiva la misma fila y recupera su centroide,

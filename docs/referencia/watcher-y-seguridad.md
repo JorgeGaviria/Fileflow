@@ -55,10 +55,32 @@ Extensiones y patrones descartados de entrada:
 Si no está estable, se reprograma con backoff en lugar de descartarse. Una ISO de 8 GB
 puede tardar media hora, y eso es normal, no un error.
 
+## Qué se considera una cosa: la política de subcarpetas
+
+Antes de detectar nada hay que decidir qué cuenta como *una* cosa. Lo dice
+`watched_dirs.subdir_policy`:
+
+| Valor | Qué hace |
+|---|---|
+| `unit` | Cada subcarpeta de primer nivel es **una** cosa, se clasifica y se mueve entera |
+| `ignore` | No se mira dentro en absoluto |
+| `descend` | Cada archivo de dentro se clasifica por separado |
+
+**El defecto es `unit`, y es una decisión de seguridad.** Con `descend`, extraer un `.zip`
+en Descargas repartiría `index.html`, `logo.css` y `manual.pdf` por tres carpetas
+distintas, deshaciendo una carpeta que el usuario mantiene junta a propósito.
+
+Cuando una carpeta es la unidad, **su contenido no se indexa por separado**: si no, habría
+47 decisiones pendientes además de la de la carpeta.
+
+Y una carpeta destino registrada **nunca** se trata como unidad, esté donde esté. Sin esa
+regla, `/Descargas/facturas` —vigilada por fuera y destino a la vez— acabaría intentando
+moverse dentro de sí misma.
+
 ## Mecanismo 3 — Reconciliación al arrancar
 
 Los eventos son efímeros; el estado no. Al iniciar se recorren los directorios vigilados y
-se comparan contra la tabla `files`:
+se comparan contra la tabla `items`:
 
 | Situación | Acción |
 |---|---|
@@ -152,6 +174,8 @@ un directorio se comprueba solapamiento y se avisa.
 
 - **No borra archivos del usuario.** Como mucho los manda a la papelera del sistema, y con
   confirmación. La papelera es un undo que el usuario ya sabe usar.
+- **No borra tampoco sus propios datos.** Las carpetas y los items se dan de baja con
+  `status`; así, volver a añadir una carpeta recupera todo lo que aprendió de ella.
 - **No sobrescribe.** Ver colisiones.
 - **No toca nada fuera de los directorios configurados.**
 - **No mueve sin dejar registro**, ni siquiera en modo automático.

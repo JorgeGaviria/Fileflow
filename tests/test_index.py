@@ -294,3 +294,79 @@ def test_los_ids_no_se_reutilizan(index, tmp_path):
     index.remove_folder(primera)
     segunda = index.add_folder(tmp_path / "musica", "musica")
     assert segunda != primera
+
+
+# -- receta de extraccion, polaridad y excepciones ---------------------------
+
+
+def test_vector_caduca_tambien_si_cambia_el_extractor(index, sample_file):
+    """Un vector no solo caduca al cambiar el modelo. Si el extractor de PDF
+    aprende OCR, los vectores de PDF escaneados son basura con el mismo
+    modelo."""
+    item_id = index.upsert_item(sample_file)
+    index.put_embedding(item_id, "text", "e5-small", np.ones(384, dtype=np.float32),
+                        extractor="pdf-text-v1")
+
+    assert index.stale_embeddings("text", "e5-small", "pdf-text-v1") == []
+    assert index.stale_embeddings("text", "e5-small", "pdf-ocr-v2") == [item_id]
+
+
+def test_los_negativos_no_entran_en_el_scoring(index, tmp_path):
+    """Se guardan para calibrar, pero get_exemplars solo devuelve positivos."""
+    folder_id = index.add_folder(tmp_path / "facturas", "facturas")
+    index.add_exemplar(folder_id, "text", "m", np.array([1.0, 0.0]), source_path="/a.pdf")
+    index.add_exemplar(folder_id, "text", "m", np.array([0.0, 1.0]), source_path="/b.pdf",
+                       polarity="negative")
+
+    assert index.get_exemplars(folder_id, "text", "m").shape[0] == 1
+    assert index.get_exemplars(folder_id, "text", "m", polarity="negative").shape[0] == 1
+
+
+def test_una_sola_decision_pendiente_por_item(index, sample_file, tmp_path):
+    """La bandeja debe mostrar cada archivo UNA vez con sus alternativas, no
+    dos veces con destinos que se contradicen."""
+    item_id = index.upsert_item(sample_file)
+    a = index.add_folder(tmp_path / "a", "a")
+    index.record_decision(item_id, [{"folder_id": a, "score": 0.9}], decided_by="semantic")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        index.record_decision(item_id, [{"folder_id": a, "score": 0.4}], decided_by="semantic")
+
+
+def test_un_patron_un_destino(index, tmp_path):
+    """Dos reglas con el mismo patron y prioridad serian ambiguas: ganaria la
+    que saliera primero, que es azar."""
+    a = index.add_folder(tmp_path / "documentos", "documentos")
+    b = index.add_folder(tmp_path / "facturas", "facturas")
+    index.conn.execute(
+        "INSERT INTO rules (match_type, pattern, folder_id) VALUES ('extension', '.pdf', ?)", (a,)
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        index.conn.execute(
+            "INSERT INTO rules (match_type, pattern, folder_id) VALUES ('extension', '.pdf', ?)",
+            (b,),
+        )
+
+
+def test_las_excepciones_no_cuentan_como_desacuerdo(index, sample_file, tmp_path):
+    """Mover una factura a /impuestos porque toca la declaracion no significa
+    que /facturas estuviera mal."""
+    a = index.add_folder(tmp_path / "facturas", "facturas")
+    b = index.add_folder(tmp_path / "impuestos", "impuestos")
+
+    for nombre, verdict, excepcion in (
+        ("uno.pdf", "accepted", False),
+        ("dos.pdf", "corrected", False),
+        ("tres.pdf", "corrected", True),  # excepcion: no es un fallo nuestro
+    ):
+        f = tmp_path / nombre
+        f.write_bytes(nombre.encode())
+        item_id = index.upsert_item(f)
+        d = index.record_decision(item_id, [{"folder_id": a, "score": 0.8}],
+                                  decided_by="semantic")
+        index.settle_decision(d, verdict, b, is_exception=excepcion)
+
+    r = index.agreement_rate()
+    assert r["decididas"] == 2          # la excepcion queda fuera
+    assert r["aceptadas"] == 1
+    assert r["tasa_acuerdo"] == 0.5

@@ -27,7 +27,7 @@ Coste: microsegundos. Si hay match con prioridad suficiente, se acabó.
 
 ### Etapa 2 — Extracción de características
 
-Solo para lo que sobrevive a la etapa 1. Convierte el archivo en algo comparable:
+Solo para lo que sobrevive a la etapa 1. Convierte el item en algo comparable:
 
 | Tipo | Qué se extrae |
 |---|---|
@@ -37,9 +37,13 @@ Solo para lo que sobrevive a la etapa 1. Convierte el archivo en algo comparable
 | Imagen | embedding visual directo (no se genera descripción) |
 | Audio / vídeo | metadatos y nombre; contenido queda fuera de v1 |
 | Binario / desconocido | solo nombre y metadatos |
+| **Carpeta como unidad** | su nombre y el listado de lo que contiene |
 
 El resultado es siempre un **vector**. A partir de aquí el sistema no distingue entre un
-PDF y una foto: son puntos en un espacio.
+PDF, una foto y una carpeta entera: son puntos en un espacio.
+
+La receta usada se guarda junto al vector (`embeddings.extractor`). Un vector caduca por
+dos motivos, no uno: si cambia el modelo o si cambia la forma de extraer el contenido.
 
 ### Etapa 3 — Scoring semántico
 
@@ -85,12 +89,15 @@ Reglas de dependencia:
 ## Ciclo de vida de un archivo
 
 ```
-detectado ──> estable ──> analizado ──> propuesto ──> confirmado ──> movido
-    │            │                          │
-    │            │                          └──> corregido ──> movido (+ ejemplo guardado)
+detectado ──> estable ──> propuesto ──> confirmado ──> movido
+    │            │            │
+    │            │            └──> corregido ──> movido (+ ejemplar, si no es excepción)
     │            └──> descartado (temporal, oculto, ignorado)
     └──> re-detectado si cambia antes de estabilizarse
 ```
 
-Cada transición queda registrada. El estado vive en la tabla `files`; el histórico de
+Ni la carpeta ni el archivo se borran nunca de la base: se dan de baja con `status`. Ver
+[esquema de datos](../referencia/esquema-de-datos.md).
+
+Cada transición queda registrada. El estado vive en la tabla `items`; el histórico de
 movimientos, en `journal`; el histórico de decisiones y veredictos, en `decisions`.

@@ -90,13 +90,27 @@ malo, da un resultado **sin sentido**.
 
 Consecuencia directa sobre el diseño:
 
-1. Cada vector se guarda con su `model_id` y su `dim`. Siempre.
+1. Cada vector se guarda con su `model_id` y sus `dimensions`. Siempre.
 2. Toda consulta de similitud filtra por `model_id`. Nunca se mezclan.
 3. Cambiar de perfil **invalida el índice** y obliga a re-indexar.
 
 El re-indexado es lento pero **no destructivo**: los archivos no se tocan, solo se
 recalculan vectores. Corre en segundo plano y la aplicación sigue usable con reglas rápidas
-mientras tanto.
+mientras tanto. Y es incremental: como `model_id` forma parte de la clave primaria de
+`embeddings`, los vectores del modelo antiguo conviven con los nuevos en lugar de borrarse.
+
+### Un vector caduca por dos motivos, no uno
+
+Cambiar de modelo es el caso evidente. El otro pasa desapercibido:
+
+> Mejoramos el extractor de PDF para que use OCR cuando no hay capa de texto.
+
+El modelo es el mismo y las dimensiones también, pero **todos los vectores de PDF escaneados
+que ya había son basura**: se generaron a partir de un texto vacío.
+
+Por eso cada vector guarda también su `extractor` (`pdf-text-v1`, `image-clip-v1`...). Es
+la misma clase de fallo que el desajuste de modelo, un escalón más abajo, y sin esa columna
+sería invisible. Ver [esquema de datos](../referencia/esquema-de-datos.md).
 
 Esto importa especialmente en este proyecto porque se desarrolla en dos máquinas con
 perfiles distintos: cada una tendrá su propio índice, y por eso la base de datos **no se

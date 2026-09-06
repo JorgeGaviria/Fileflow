@@ -22,7 +22,7 @@ from typing import Any, Iterable, Iterator
 
 import numpy as np
 
-SCHEMA_VERSION = 3  # status unificado, sin DELETE de entidades propias
+SCHEMA_VERSION = 4  # extractor, polaridad de ejemplares, excepciones
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -357,17 +357,39 @@ class Index:
     # -- embeddings ----------------------------------------------------------
 
     def put_embedding(
-        self, item_id: int, vector_space: str, model_id: str, vec: np.ndarray
+        self,
+        item_id: int,
+        vector_space: str,
+        model_id: str,
+        vec: np.ndarray,
+        extractor: str = "",
     ) -> None:
+        """extractor: con que receta se obtuvo el contenido ('pdf-text-v1'...).
+
+        Un vector caduca por dos motivos, no uno: si cambia el modelo o si
+        cambia la receta de extraccion. Guardarla permite detectar el segundo.
+        """
         self.conn.execute(
-            "INSERT INTO embeddings (item_id, vector_space, model_id, dimensions, vector) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "INSERT INTO embeddings "
+            "(item_id, vector_space, model_id, extractor, dimensions, vector) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(item_id, vector_space, model_id) DO UPDATE SET "
             "  vector = excluded.vector, dimensions = excluded.dimensions, "
-            "  created_at = datetime('now')",
-            (item_id, vector_space, model_id, int(np.size(vec)), pack_vector(vec)),
+            "  extractor = excluded.extractor, created_at = datetime('now')",
+            (item_id, vector_space, model_id, extractor, int(np.size(vec)), pack_vector(vec)),
         )
         self.conn.commit()
+
+    def stale_embeddings(self, vector_space: str, model_id: str, extractor: str) -> list[int]:
+        """Items cuyo vector se genero con otra receta y hay que regenerar."""
+        return [
+            r["item_id"]
+            for r in self.conn.execute(
+                "SELECT item_id FROM embeddings "
+                "WHERE vector_space = ? AND model_id = ? AND extractor != ?",
+                (vector_space, model_id, extractor),
+            )
+        ]
 
     def get_embedding(
         self, item_id: int, vector_space: str, model_id: str
@@ -473,13 +495,21 @@ class Index:
         model_id: str,
         vec: np.ndarray,
         source_path: str | None = None,
+        polarity: str = "positive",
     ) -> int:
+        """polarity: 'positive' (va aqui) o 'negative' (NO iba aqui).
+
+        Los negativos se guardan pero no entran en el scoring de v1: un
+        negativo puede ser una excepcion disfrazada de regla. Se usan para
+        calibrar el umbral de la carpeta. Ver docs/diseno/motor-de-decision.md
+        """
         cur = self.conn.execute(
             "INSERT INTO exemplars "
-            "(folder_id, vector_space, model_id, dimensions, vector, source_path) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(folder_id, polarity, vector_space, model_id, dimensions, vector, source_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 folder_id,
+                polarity,
                 vector_space,
                 model_id,
                 int(np.size(vec)),
@@ -490,12 +520,20 @@ class Index:
         self.conn.commit()
         return cur.lastrowid
 
-    def get_exemplars(self, folder_id: int, vector_space: str, model_id: str) -> np.ndarray:
+    def get_exemplars(
+        self,
+        folder_id: int,
+        vector_space: str,
+        model_id: str,
+        polarity: str = "positive",
+    ) -> np.ndarray:
+        """Por defecto solo los positivos: son los unicos que entran en el
+        scoring de v1."""
         rows = list(
             self.conn.execute(
                 "SELECT vector, dimensions FROM exemplars "
-                "WHERE folder_id = ? AND vector_space = ? AND model_id = ?",
-                (folder_id, vector_space, model_id),
+                "WHERE folder_id = ? AND vector_space = ? AND model_id = ? AND polarity = ?",
+                (folder_id, vector_space, model_id, polarity),
             )
         )
         if not rows:
@@ -542,14 +580,46 @@ class Index:
         self.conn.commit()
         return cur.lastrowid
 
-    def settle_decision(self, decision_id: int, verdict: str, final_folder_id: int | None) -> None:
-        """verdict: 'accepted' | 'corrected' | 'rejected'"""
+    def settle_decision(
+        self,
+        decision_id: int,
+        verdict: str,
+        final_folder_id: int | None,
+        is_exception: bool = False,
+    ) -> None:
+        """verdict: 'accepted' | 'corrected' | 'rejected'
+
+        is_exception distingue "te equivocaste" de "esta vez quiero otra cosa".
+        Una excepcion no genera ejemplar y no cuenta como desacuerdo: mover una
+        factura a /impuestos porque toca la declaracion no significa que
+        /facturas estuviera mal.
+        """
         self.conn.execute(
-            "UPDATE decisions SET verdict = ?, final_folder_id = ?, decided_at = datetime('now') "
-            "WHERE id = ?",
-            (verdict, final_folder_id, decision_id),
+            "UPDATE decisions SET verdict = ?, final_folder_id = ?, is_exception = ?, "
+            "  decided_at = datetime('now') WHERE id = ?",
+            (verdict, final_folder_id, int(is_exception), decision_id),
         )
         self.conn.commit()
+
+    def agreement_rate(self) -> dict[str, Any]:
+        """Tasa de acuerdo con el usuario, no "precision".
+
+        No existe una verdad objetiva: el objetivo es colocar los archivos
+        donde ESTE usuario los quiere. Las excepciones se excluyen porque no
+        son desacuerdos con la propuesta.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "  SUM(verdict = 'accepted') AS aceptadas "
+            "FROM decisions WHERE verdict != 'pending' AND is_exception = 0"
+        ).fetchone()
+        total = row["total"] or 0
+        aceptadas = row["aceptadas"] or 0
+        return {
+            "decididas": total,
+            "aceptadas": aceptadas,
+            "tasa_acuerdo": (aceptadas / total) if total else None,
+        }
 
     def pending_decisions(self) -> list[sqlite3.Row]:
         return list(

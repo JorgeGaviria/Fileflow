@@ -12,18 +12,23 @@ Sin LLM, sin GPU, sin dependencias pesadas.
 |---|---|---|
 | 1 | Repositorio, esquema SQLite, capa de índice | ✅ |
 | 2 | Watcher: debounce, estabilidad, reconciliación | ✅ |
-| 3 | Motor de reglas rápidas (extensión, glob, regex) | ⬜ |
-| 4 | Extracción de texto (txt, md, pdf, docx) | ⬜ |
-| 5 | Embeddings ONNX: e5-small y CLIP ViT-B/32 | ⬜ |
-| 6 | Scoring: descripción + centroide + ejemplares | ⬜ |
-| 7 | Executor + journal + undo | ⬜ |
-| 8 | Bandeja de confirmación (CLI primero, luego UI) | ⬜ |
-| 9 | Corpus de pruebas y métricas | ⬜ |
+| 3 | Revisión del esquema tabla por tabla | ✅ |
+| 4 | Carpetas como unidad: **código** (el esquema ya lo soporta) | ⬜ |
+| 5 | Motor de reglas rápidas (extensión, glob, regex) | ⬜ |
+| 6 | Extracción de texto (txt, md, pdf, docx) | ⬜ |
+| 7 | Embeddings ONNX: e5-small y CLIP ViT-B/32 | ⬜ |
+| 8 | Scoring: descripción + centroide + ejemplares | ⬜ |
+| 9 | Executor + journal + undo | ⬜ |
+| 10 | Bandeja de confirmación (CLI primero, luego UI) | ⬜ |
+| 11 | Corpus de pruebas y métricas | ⬜ |
 
 ### Qué queda explícitamente fuera de v1
 
-- **Movimiento automático.** Todo pasa por confirmación. Sin datos de precisión, activar el
+- **Movimiento automático.** Todo pasa por confirmación. Sin datos de acuerdo, activar el
   automático es apostar con los archivos del usuario.
+- **Ejemplares negativos en el scoring.** La polaridad se guarda desde v1, pero solo se usa
+  para calibrar umbrales por carpeta. Un negativo puede ser una excepción disfrazada de
+  regla.
 - **LLM.** Ver [modelos y perfiles](../diseno/modelos-y-perfiles.md).
 - **Explorador de archivos.** Ver más abajo.
 - **OCR**, audio y vídeo.
@@ -32,7 +37,8 @@ Sin LLM, sin GPU, sin dependencias pesadas.
 
 v1 está lista cuando, sobre el corpus de `fixtures/` y en la máquina de 8 GB:
 
-- precisión top-1 **≥ 80 %** en carpetas con 20+ archivos
+- acuerdo top-1 **≥ 80 %** en carpetas con 20+ elementos (ver por qué no se llama
+  *precisión* en [motor de decisión](../diseno/motor-de-decision.md))
 - recall top-5 **≥ 95 %**
 - **< 500 ms** por archivo de texto, extracción incluida
 - **cero** archivos perdidos en 1000 movimientos con undo verificado
@@ -79,6 +85,9 @@ Lo que pide el planteamiento original: subdividir la carpeta de descarte por **m
 ### Otras
 
 - Centroides múltiples para carpetas heterogéneas
+- Fecha EXIF para `organize_by='month'` en fotos: la fecha real de una foto está dentro del
+  JPG, no en el sistema de archivos
+- Ejemplares negativos en el scoring, si al medir resulta que calibrar el umbral no basta
 - Reglas de nombrado (renombrar al mover según plantilla)
 - Detección de duplicados en todo el árbol
 
